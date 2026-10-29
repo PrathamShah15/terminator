@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -g -D_GNU_SOURCE
 LDLIBS = -lX11
 
-SOURCES = main.c gui.c shell.c parser.c builtins.c hotkeys.c
+SOURCES = main.c gui.c shell.c parser.c builtins.c hotkeys.c multiwatch.c
 OBJECTS = $(SOURCES:.c=.o)
 
 .PHONY: all clean

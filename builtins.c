@@ -228,6 +228,15 @@ int builtin_execute(App *app, Tab *tab, const char *line)
         return 1;
     }
 
+    if (strcmp(argument, "multiWatch") == 0) {
+        *end = saved;
+        argument = end;
+        while (*argument == ' ' || *argument == '\t')
+            argument++;
+        (void)multiwatch_start(app, tab, argument);
+        return 1;
+    }
+
     *end = saved;
     return 0;
 }

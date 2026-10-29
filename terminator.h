@@ -14,6 +14,8 @@
 #define MAX_COMMANDS 32
 #define MAX_ARGS 128
 #define MAX_JOBS 32
+#define MAX_WATCH_COMMANDS 16
+#define WATCH_OUTPUT_CAP 8192
 
 typedef struct {
     char cwd[PATH_MAX];
@@ -36,6 +38,26 @@ typedef struct {
     int tab_index;
     char command[INPUT_CAP];
 } Job;
+
+typedef struct {
+    char command[INPUT_CAP];
+    char cwd[PATH_MAX];
+    pid_t pgid;
+    pid_t pids[MAX_COMMANDS];
+    int pid_count;
+    int output_fd;
+    int active;
+    int running;
+    int header_printed;
+    long long next_run_ms;
+} WatchCommand;
+
+typedef struct {
+    int active;
+    int tab_index;
+    int count;
+    WatchCommand commands[MAX_WATCH_COMMANDS];
+} MultiWatch;
 
 typedef struct {
     Display *display;
@@ -62,6 +84,7 @@ typedef struct {
     pid_t foreground_pgid;
     Job jobs[MAX_JOBS];
     int next_job_id;
+    MultiWatch multiwatch;
 } App;
 
 void gui_run(App *app);
@@ -78,5 +101,8 @@ void history_add(App *app, const char *line);
 void history_load(App *app);
 void history_save(App *app);
 void history_free(App *app);
+int multiwatch_start(App *app, Tab *tab, const char *arguments);
+void multiwatch_poll(App *app);
+void multiwatch_stop(App *app);
 
 #endif

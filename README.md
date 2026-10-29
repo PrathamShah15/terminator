@@ -142,3 +142,16 @@ Terminator is an educational project under development. It aims to demonstrate t
 ## License
 
 No license has been specified yet.
+
+
+## `multiWatch` (parallel command monitoring)
+
+`multiWatch` runs multiple commands concurrently, captures each command's output, and reruns each command two seconds after its previous run completes. Each command may contain a pipeline; the shell builds the pipeline itself rather than asking Bash or another shell to interpret it. Focus the Terminator window and press **Ctrl+C** to stop all watched commands while leaving the terminal open.
+
+Example:
+
+```text
+multiWatch ["date +%T", "ls | wc -l"]
+```
+
+The compact example spellings `date+%T` and `wc-l` are also accepted and normalized to `date +%T` and `wc -l`.

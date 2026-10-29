@@ -12,7 +12,9 @@ static int command_is_builtin(const char *line)
            (strncmp(line, "exit", 4) == 0 && (line[4] == '\0' || isspace((unsigned char)line[4]))) ||
            strcmp(line, "history") == 0 || strcmp(line, "clear") == 0 ||
            strncmp(line, "jobs", 4) == 0 || strncmp(line, "fg", 2) == 0 ||
-           strncmp(line, "bg", 2) == 0;
+           strncmp(line, "bg", 2) == 0 ||
+           (strncmp(line, "multiWatch", 10) == 0 &&
+            (line[10] == '\0' || isspace((unsigned char)line[10])));
 }
 
 void shell_execute(App *app, Tab *tab, const char *line)

@@ -103,7 +103,7 @@ static void draw_tab_bar(App *app)
         XSetForeground(app->display, app->gc, app->accent);
         XDrawRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
         int plus_width = XTextWidth(app->font, "+", 1);
-        int text_x = plus_x + (32 - plus_width) / 2 + 2;
+        int text_x = plus_x + (32 - plus_width) / 2 + 3;
         int text_y = 25;
 
         XDrawString(app->display, app->window, app->gc,text_x, text_y, "+", 1);
@@ -203,10 +203,15 @@ void gui_run(App *app)
 {
     int x_fd = ConnectionNumber(app->display);
     while (app->running) {
-        jobs_poll(app); gui_redraw(app);
+        jobs_poll(app);
+        multiwatch_poll(app);
+        gui_redraw(app);
         if (!XPending(app->display)) {
             struct pollfd descriptor = { .fd = x_fd, .events = POLLIN, .revents = 0 };
-            (void)poll(&descriptor, 1, 100); jobs_poll(app); gui_redraw(app);
+            (void)poll(&descriptor, 1, 100);
+            jobs_poll(app);
+            multiwatch_poll(app);
+            gui_redraw(app);
         }
         while (XPending(app->display)) {
             XEvent event; XNextEvent(app->display, &event);
@@ -227,8 +232,16 @@ void gui_run(App *app)
             } else if (event.type == KeyPress) {
                 char text[32] = ""; KeySym key;
                 int length = XLookupString(&event.xkey, text, sizeof(text) - 1, &key, NULL); text[length] = '\0';
-                hotkey_handle(app, &event.xkey, key, text, length); gui_redraw(app);
+                if (app->multiwatch.active && (event.xkey.state & ControlMask) &&
+                    (key == XK_c || key == XK_C)) {
+                    multiwatch_stop(app);
+                } else {
+                    hotkey_handle(app, &event.xkey, key, text, length);
+                }
+                gui_redraw(app);
             }
         }
     }
+    if (app->multiwatch.active)
+        multiwatch_stop(app);
 }
