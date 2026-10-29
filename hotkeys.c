@@ -50,7 +50,10 @@ static void append_multiline(Tab *tab, const char *line)
         length--;
     memcpy(tab->multiline + used, line, length);
     used += length;
-    tab->multiline[used++] = backslash_continuation ? ' ' : '\n';
+    /* A trailing backslash joins the next line with no separator.
+       An open quote keeps a real newline inside the argument. */
+    if (!backslash_continuation)
+        tab->multiline[used++] = '\n';
     tab->multiline[used] = '\0';
 }
 
@@ -210,13 +213,16 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         return 1;
     }
     if (key == XK_Return || key == XK_KP_Enter) {
+        tab->scroll_offset = 0;
         char prompt[PATH_MAX + 64];
 
         if (tab->continuing) {
             snprintf(prompt, sizeof(prompt), "> ");
             append_visible_command(tab, prompt, tab->input);
 
-            if (command_is_incomplete(tab->input)) {
+            char candidate[INPUT_CAP * 2];
+            snprintf(candidate, sizeof(candidate), "%s%s", tab->multiline, tab->input);
+            if (command_is_incomplete(candidate)) {
                 append_multiline(tab, tab->input);
                 tab->input[0] = '\0';
                 tab->cursor = 0;

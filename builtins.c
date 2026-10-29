@@ -25,22 +25,149 @@ void tab_clear(Tab *tab)
     tab->output[0] = '\0';
 }
 
+
+/* Get the location of the persistent history file. */
+static int history_file_path(char *path, size_t size)
+{
+    const char *home = getenv("HOME");
+
+    if (home == NULL || home[0] == '\0')
+        return 0;
+
+    int written = snprintf(path, size, "%s/.terminator_history", home);
+    return written >= 0 && (size_t)written < size;
+}
+
+/* Add a command to memory without writing it to disk. */
+static int history_store_memory(App *app, const char *line)
+{
+    if (app->history_count > 0 &&
+        strcmp(app->history[app->history_count - 1], line) == 0)
+        return 1;
+
+    if (app->history_count == HISTORY_CAP) {
+        free(app->history[0]);
+        memmove(app->history, app->history + 1,
+                sizeof(*app->history) * (HISTORY_CAP - 1));
+        app->history_count--;
+    }
+
+    if (app->history_count == app->history_capacity) {
+        int new_capacity = app->history_capacity == 0
+                         ? 128 : app->history_capacity * 2;
+
+        if (new_capacity > HISTORY_CAP)
+            new_capacity = HISTORY_CAP;
+
+        char **new_history = realloc(
+            app->history, sizeof(*app->history) * (size_t)new_capacity);
+
+        if (new_history == NULL)
+            return 0;
+
+        app->history = new_history;
+        app->history_capacity = new_capacity;
+    }
+
+    char *copy = strdup(line);
+    if (copy == NULL)
+        return 0;
+
+    app->history[app->history_count++] = copy;
+    return 1;
+}
+
+/* Save the currently loaded history to disk. */
+void history_save(App *app)
+{
+    char path[PATH_MAX];
+
+    if (!history_file_path(path, sizeof(path)))
+        return;
+
+    FILE *file = fopen(path, "w");
+    if (file == NULL)
+        return;
+
+    for (int i = 0; i < app->history_count; i++)
+        fprintf(file, "%s\n", app->history[i]);
+
+    fclose(file);
+}
+
+/* Load saved commands when Terminator starts. */
+void history_load(App *app)
+{
+    char path[PATH_MAX];
+
+    if (!history_file_path(path, sizeof(path)))
+        return;
+
+    FILE *file = fopen(path, "r");
+    if (file == NULL)
+        return; /* No history file yet. */
+
+    char line[INPUT_CAP];
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        size_t length = strlen(line);
+
+        if (length > 0 && line[length - 1] == '\n')
+            line[--length] = '\0';
+
+        if (length > 0)
+            history_store_memory(app, line);
+    }
+
+    fclose(file);
+}
+
+/* Add a new command and persist it. */
 void history_add(App *app, const char *line)
 {
     if (line == NULL || line[0] == '\0')
         return;
+
     if (app->history_count > 0 &&
         strcmp(app->history[app->history_count - 1], line) == 0)
         return;
 
-    if (app->history_count == HISTORY_CAP) {
-        memmove(app->history, app->history + 1,
-                sizeof(app->history[0]) * (HISTORY_CAP - 1));
-        app->history_count--;
+    int was_full = (app->history_count == HISTORY_CAP);
+
+    if (!history_store_memory(app, line))
+        return;
+
+    if (was_full) {
+        /* Rewrite the file so only the most recent 10,000 remain. */
+        history_save(app);
+        return;
     }
-    snprintf(app->history[app->history_count], INPUT_CAP, "%s", line);
-    app->history_count++;
+
+    char path[PATH_MAX];
+
+    if (!history_file_path(path, sizeof(path)))
+        return;
+
+    FILE *file = fopen(path, "a");
+    if (file == NULL)
+        return;
+
+    fprintf(file, "%s\n", line);
+    fclose(file);
 }
+
+/* Release dynamically allocated history memory. */
+void history_free(App *app)
+{
+    for (int i = 0; i < app->history_count; i++)
+        free(app->history[i]);
+
+    free(app->history);
+    app->history = NULL;
+    app->history_count = 0;
+    app->history_capacity = 0;
+}
+
 
 /* Built-ins are kept in this file because they change shell state. */
 int builtin_execute(App *app, Tab *tab, const char *line)

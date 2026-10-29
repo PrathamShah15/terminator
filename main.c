@@ -3,11 +3,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <X11/Xutil.h>
+
+static unsigned long named_color(Display *display, int screen, const char *name, unsigned long fallback)
+{
+    XColor color, exact;
+    Colormap map = DefaultColormap(display, screen);
+    if (XAllocNamedColor(display, map, name, &color, &exact))
+        return color.pixel;
+    return fallback;
+}
 
 int main(void)
 {
     App app;
     memset(&app, 0, sizeof(app));
+    history_load(&app);
 
     app.display = XOpenDisplay(NULL);
     if (app.display == NULL) {
@@ -20,12 +31,17 @@ int main(void)
     app.height = 650;
     app.background = BlackPixel(app.display, screen);
     app.foreground = WhitePixel(app.display, screen);
+    app.tab_background = named_color(app.display, screen, "#202632", app.background);
+    app.active_tab_background = named_color(app.display, screen, "#30445c", app.tab_background);
+    app.accent = named_color(app.display, screen, "#56b6c2", app.foreground);
+    app.prompt_color = named_color(app.display, screen, "#55d98a", app.foreground);
+    app.border_color = named_color(app.display, screen, "#465366", app.foreground);
     app.window = XCreateSimpleWindow(app.display, RootWindow(app.display, screen),
                                      80, 60, (unsigned)app.width, (unsigned)app.height,
                                      1, app.foreground, app.background);
     XStoreName(app.display, app.window, "Terminator");
     XSelectInput(app.display, app.window,
-                 ExposureMask | KeyPressMask | StructureNotifyMask);
+                 ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
 
     app.font = XLoadQueryFont(app.display, "9x18");
     if (app.font == NULL)
@@ -53,5 +69,7 @@ int main(void)
     XFreeGC(app.display, app.gc);
     XDestroyWindow(app.display, app.window);
     XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
     return 0;
 }

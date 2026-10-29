@@ -10,7 +10,7 @@
 #define MAX_TABS 8
 #define INPUT_CAP 4096
 #define OUTPUT_CAP 65536
-#define HISTORY_CAP 100
+#define HISTORY_CAP 10000
 #define MAX_COMMANDS 32
 #define MAX_ARGS 128
 #define MAX_JOBS 32
@@ -24,6 +24,7 @@ typedef struct {
     char multiline[INPUT_CAP];
     int continuing;
     int history_index;
+    int scroll_offset;
     int alive;
 } Tab;
 
@@ -43,14 +44,20 @@ typedef struct {
     XFontStruct *font;
     unsigned long foreground;
     unsigned long background;
+    unsigned long tab_background;
+    unsigned long active_tab_background;
+    unsigned long accent;
+    unsigned long prompt_color;
+    unsigned long border_color;
     int width;
     int height;
     int running;
     int tab_count;
     int active_tab;
     Tab tabs[MAX_TABS];
-    char history[HISTORY_CAP][INPUT_CAP];
+    char **history;
     int history_count;
+    int history_capacity;
     int exit_requested;
     pid_t foreground_pgid;
     Job jobs[MAX_JOBS];
@@ -68,5 +75,8 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
 void tab_append(Tab *tab, const char *text);
 void tab_clear(Tab *tab);
 void history_add(App *app, const char *line);
+void history_load(App *app);
+void history_save(App *app);
+void history_free(App *app);
 
 #endif
