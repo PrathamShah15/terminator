@@ -10,8 +10,8 @@
 #define TAB_BAR_HEIGHT 42
 #define CONTENT_TOP 58
 #define LINE_GAP 3
-#define TAB_WIDTH 164
-#define PLUS_WIDTH 42
+#define TAB_WIDTH 220
+#define PLUS_WIDTH 48
 
 typedef struct { char *text; int length; } DisplayLine;
 
@@ -34,37 +34,16 @@ static int text_width(const App *app, const char *text, int length)
 
     XGlyphInfo extents;
 
-    XftTextExtentsUtf8(
-        app->display,
-        app->font,
-        (const FcChar8 *)text,
-        length,
-        &extents
-    );
-
+    XftTextExtentsUtf8(app->display,app->font,(const FcChar8 *)text,length,&extents);
     return extents.xOff;
 }
 
-static void draw_text(
-    App *app,
-    int x,
-    int y,
-    const char *text,
-    int length,
-    XftColor *color)
+static void draw_text(App *app,int x,int y,const char *text,int length,XftColor *color)
 {
     if (app->font == NULL || app->xft_draw == NULL)
         return;
 
-    XftDrawStringUtf8(
-        app->xft_draw,
-        color,
-        app->font,
-        x,
-        y,
-        (const FcChar8 *)text,
-        length
-    );
+    XftDrawStringUtf8(app->xft_draw,color,app->font,x,y,(const FcChar8 *)text,length);
 }
 
 
@@ -144,9 +123,25 @@ static void draw_tab_bar(App *app)
         ? &app->xft_accent: &app->xft_foreground);
 
         int cx = x + width - 17;
-        XDrawLine(app->display, app->window, app->gc, cx - 3, 17, cx + 3, 23);
-        XDrawLine(app->display, app->window, app->gc, cx + 3, 17, cx - 3, 23);
+
+        XftFont *close_font = XftFontOpenName(app->display,DefaultScreen(app->display),
+            "DejaVu Sans Mono:style=Bold:size=14");
+
+        if (close_font != NULL) {const char *close_symbol = "×";XGlyphInfo extents;
+
+        XftTextExtentsUtf8(app->display,close_font,(const FcChar8 *)close_symbol,
+        strlen(close_symbol),&extents);
+
+        int close_x = (cx - extents.xOff / 2)-5;
+        int close_y = 26;
+
+        XftDrawStringUtf8(app->xft_draw,&app->xft_accent,close_font,close_x,
+            close_y,(const FcChar8 *)close_symbol,strlen(close_symbol));
+
+        XftFontClose(app->display, close_font);
+        }
     }
+
     int plus_x = app->tab_count * TAB_WIDTH + 7;
     if (plus_x + PLUS_WIDTH < app->width) {
         XSetForeground(app->display, app->gc, app->tab_background);
@@ -154,8 +149,8 @@ static void draw_tab_bar(App *app)
         XSetForeground(app->display, app->gc, app->accent);
         XDrawRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
         int plus_width = text_width(app, "+", 1);
-        int text_x = plus_x + (32 - plus_width) / 2 + 3;
-        int text_y = 25;
+        int text_x = plus_x + (32 - plus_width) / 2 + 6;
+        int text_y = 27;
 
         draw_text(app, text_x, text_y, "+", 1, &app->xft_accent);
     }
