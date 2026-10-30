@@ -15,9 +15,58 @@
 
 typedef struct { char *text; int length; } DisplayLine;
 
-static int font_height(const App *app) { return app->font ? app->font->ascent + app->font->descent : 18; }
-static int line_height(const App *app) { return font_height(app) + LINE_GAP; }
-static int text_width(const App *app, const char *text, int length) { return app->font ? XTextWidth(app->font, text, length) : length * 8; }
+static int font_height(const App *app)
+{
+    return app->font
+        ? app->font->ascent + app->font->descent
+        : 18;
+}
+
+static int line_height(const App *app)
+{
+    return font_height(app) + LINE_GAP;
+}
+
+static int text_width(const App *app, const char *text, int length)
+{
+    if (app->font == NULL)
+        return length * 8;
+
+    XGlyphInfo extents;
+
+    XftTextExtentsUtf8(
+        app->display,
+        app->font,
+        (const FcChar8 *)text,
+        length,
+        &extents
+    );
+
+    return extents.xOff;
+}
+
+static void draw_text(
+    App *app,
+    int x,
+    int y,
+    const char *text,
+    int length,
+    XftColor *color)
+{
+    if (app->font == NULL || app->xft_draw == NULL)
+        return;
+
+    XftDrawStringUtf8(
+        app->xft_draw,
+        color,
+        app->font,
+        x,
+        y,
+        (const FcChar8 *)text,
+        length
+    );
+}
+
 
 static void free_lines(DisplayLine *lines, size_t count)
 {
@@ -91,7 +140,9 @@ static void draw_tab_bar(App *app)
         XDrawRectangle(app->display, app->window, app->gc, x, 5, (unsigned)width, TAB_BAR_HEIGHT - 11);
         XSetForeground(app->display, app->gc, i == app->active_tab ? app->accent : app->foreground);
         char label[32]; snprintf(label, sizeof(label), "%d  %s", i + 1, i == app->active_tab ? "Terminal" : "Tab");
-        XDrawString(app->display, app->window, app->gc, x + 10, 27, label, (int)strlen(label));
+        draw_text(app,x+10,27,label,(int)strlen(label),i == app->active_tab
+        ? &app->xft_accent: &app->xft_foreground);
+
         int cx = x + width - 17;
         XDrawLine(app->display, app->window, app->gc, cx - 3, 17, cx + 3, 23);
         XDrawLine(app->display, app->window, app->gc, cx + 3, 17, cx - 3, 23);
@@ -102,11 +153,11 @@ static void draw_tab_bar(App *app)
         XFillRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
         XSetForeground(app->display, app->gc, app->accent);
         XDrawRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
-        int plus_width = XTextWidth(app->font, "+", 1);
+        int plus_width = text_width(app, "+", 1);
         int text_x = plus_x + (32 - plus_width) / 2 + 3;
         int text_y = 25;
 
-        XDrawString(app->display, app->window, app->gc,text_x, text_y, "+", 1);
+        draw_text(app, text_x, text_y, "+", 1, &app->xft_accent);
     }
 }
 
@@ -165,11 +216,12 @@ void gui_redraw(App *app)
     size_t output_end = output_count - (size_t)tab->scroll_offset;
     size_t output_start = output_end > output_rows ? output_end - output_rows : 0;
     int y = first_y;
-    XSetForeground(app->display, app->gc, app->foreground);
+    
     for (size_t i = output_start; i < output_end; i++) {
-        XDrawString(app->display, app->window, app->gc, LEFT_MARGIN, y, lines[i].text, lines[i].length);
+        draw_text(app,LEFT_MARGIN,y,lines[i].text,lines[i].length,&app->xft_foreground);
         y += line_height(app);
     }
+
     // if (tab->scroll_offset == 0 && output_rows > 0 && output_count > output_rows)
     //     y = first_y + (int)(output_rows - (output_end - output_start)) * line_height(app);
     for (size_t i = input_start_index; i < count; i++) {
@@ -178,15 +230,16 @@ void gui_redraw(App *app)
         size_t prompt_part = global_start < prompt_length ? prompt_length - global_start : 0;
         if (prompt_part > line_length) prompt_part = line_length;
         int x = LEFT_MARGIN;
+        
         if (prompt_part > 0) {
-            XSetForeground(app->display, app->gc, app->prompt_color);
-            XDrawString(app->display, app->window, app->gc, x, y, line, (int)prompt_part);
+            draw_text(app,x,y,line,(int)prompt_part,&app->xft_prompt_color);
             x += text_width(app, line, (int)prompt_part);
         }
+
         if (line_length > prompt_part) {
-            XSetForeground(app->display, app->gc, app->foreground);
-            XDrawString(app->display, app->window, app->gc, x, y, line + prompt_part, (int)(line_length - prompt_part));
+            draw_text(app,x,y,line + prompt_part,(int)(line_length - prompt_part),&app->xft_foreground);
         }
+
         size_t line_end = global_start + line_length;
         if (cursor_position >= global_start && cursor_position <= line_end) {
             size_t in_line = cursor_position - global_start;

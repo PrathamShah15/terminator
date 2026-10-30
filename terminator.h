@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <X11/Xft/Xft.h>
 
 #define MAX_TABS 8
 #define INPUT_CAP 4096
@@ -63,7 +64,14 @@ typedef struct {
     Display *display;
     Window window;
     GC gc;
-    XFontStruct *font;
+
+    XftFont *font;
+    XftDraw *xft_draw;
+
+    XftColor xft_foreground;
+    XftColor xft_prompt_color;
+    XftColor xft_accent;
+    
     unsigned long foreground;
     unsigned long background;
     unsigned long tab_background;

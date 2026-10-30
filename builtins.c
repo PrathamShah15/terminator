@@ -26,7 +26,6 @@ void tab_clear(Tab *tab)
 }
 
 
-/* Get the location of the persistent history file. */
 static int history_file_path(char *path, size_t size)
 {
     const char *home = getenv("HOME");
@@ -38,11 +37,10 @@ static int history_file_path(char *path, size_t size)
     return written >= 0 && (size_t)written < size;
 }
 
-/* Add a command to memory without writing it to disk. */
 static int history_store_memory(App *app, const char *line)
 {
     if (app->history_count > 0 &&
-        strcmp(app->history[app->history_count - 1], line) == 0)
+        strcmp(app->history[app->history_count - 1], line) == 0) //same command not stored
         return 1;
 
     if (app->history_count == HISTORY_CAP) {
@@ -77,7 +75,6 @@ static int history_store_memory(App *app, const char *line)
     return 1;
 }
 
-/* Save the currently loaded history to disk. */
 void history_save(App *app)
 {
     char path[PATH_MAX];
@@ -95,7 +92,7 @@ void history_save(App *app)
     fclose(file);
 }
 
-/* Load saved commands when Terminator starts. */
+
 void history_load(App *app)
 {
     char path[PATH_MAX];
@@ -105,7 +102,7 @@ void history_load(App *app)
 
     FILE *file = fopen(path, "r");
     if (file == NULL)
-        return; /* No history file yet. */
+        return;
 
     char line[INPUT_CAP];
 
@@ -122,7 +119,7 @@ void history_load(App *app)
     fclose(file);
 }
 
-/* Add a new command and persist it. */
+
 void history_add(App *app, const char *line)
 {
     if (line == NULL || line[0] == '\0')
@@ -156,7 +153,7 @@ void history_add(App *app, const char *line)
     fclose(file);
 }
 
-/* Release dynamically allocated history memory. */
+
 void history_free(App *app)
 {
     for (int i = 0; i < app->history_count; i++)
@@ -169,7 +166,7 @@ void history_free(App *app)
 }
 
 
-/* Built-ins are kept in this file because they change shell state. */
+
 int builtin_execute(App *app, Tab *tab, const char *line)
 {
     char command[INPUT_CAP];

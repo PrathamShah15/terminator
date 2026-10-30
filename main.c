@@ -14,6 +14,21 @@ static unsigned long named_color(Display *display, int screen, const char *name,
     return fallback;
 }
 
+static int allocate_xft_color(
+    Display *display,
+    int screen,
+    const char *name,
+    XftColor *color)
+{
+    return XftColorAllocName(
+        display,
+        DefaultVisual(display, screen),
+        DefaultColormap(display, screen),
+        name,
+        color
+    );
+}
+
 int main(void)
 {
     App app;
@@ -43,13 +58,62 @@ int main(void)
     XSelectInput(app.display, app.window,
                  ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
 
-    app.font = XLoadQueryFont(app.display, "9x18");
-    if (app.font == NULL)
-        app.font = XLoadQueryFont(app.display, "fixed");
-    app.gc = XCreateGC(app.display, app.window, 0, NULL);
-    if (app.font != NULL)
-        XSetFont(app.display, app.gc, app.font->fid);
-    XSetForeground(app.display, app.gc, app.foreground);
+    // Load scalable font
+app.font = XftFontOpenName(
+    app.display,
+    screen,
+    "DejaVu Sans Mono:size=16"
+);
+
+if (app.font == NULL) {
+    fprintf(stderr, "Could not load Xft font\n");
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Create Xft drawing context
+app.xft_draw = XftDrawCreate(
+    app.display,
+    app.window,
+    DefaultVisual(app.display, screen),
+    DefaultColormap(app.display, screen)
+);
+
+if (app.xft_draw == NULL) {
+    fprintf(stderr, "Could not create Xft drawing context\n");
+    XftFontClose(app.display, app.font);
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Allocate text colors
+if (!allocate_xft_color(app.display, screen, "#ffffff",
+                        &app.xft_foreground) ||
+    !allocate_xft_color(app.display, screen, "#55d98a",
+                        &app.xft_prompt_color) ||
+    !allocate_xft_color(app.display, screen, "#56b6c2",
+                        &app.xft_accent)) {
+
+    fprintf(stderr, "Could not allocate Xft colors\n");
+
+    XftDrawDestroy(app.xft_draw);
+    XftFontClose(app.display, app.font);
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Keep GC for existing X11 rectangle and line drawing
+app.gc = XCreateGC(app.display, app.window, 0, NULL);
+XSetForeground(app.display, app.gc, app.foreground);
     XMapWindow(app.display, app.window);
 
     app.running = 1;
@@ -64,9 +128,19 @@ int main(void)
 
     gui_run(&app);
 
-    if (app.font != NULL)
-        XFreeFont(app.display, app.font);
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_foreground);
+
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_prompt_color);
+
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_accent);
+
+    XftDrawDestroy(app.xft_draw);
+    XftFontClose(app.display, app.font);
     XFreeGC(app.display, app.gc);
+
     XDestroyWindow(app.display, app.window);
     XCloseDisplay(app.display);
     history_save(&app);
