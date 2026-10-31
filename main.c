@@ -1,0 +1,132 @@
+#include "terminator.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <X11/Xutil.h>
+
+static unsigned long named_color(Display *display, int screen, const char *name, unsigned long fallback)
+{
+    XColor color, exact;
+    Colormap map = DefaultColormap(display, screen);
+    if (XAllocNamedColor(display, map, name, &color, &exact))
+        return color.pixel;
+    return fallback;
+}
+
+static int allocate_xft_color(Display *display,int screen,const char *name,XftColor *color)
+{
+    return XftColorAllocName(display,DefaultVisual(display, screen),DefaultColormap(display, screen),
+        name,color);
+}
+
+int main(void)
+{
+    App app;
+    memset(&app, 0, sizeof(app));
+    history_load(&app);
+
+    app.display = XOpenDisplay(NULL);
+    if (app.display == NULL) {
+        fprintf(stderr, "terminator: cannot open X display. Check that XWayland is running.\n");
+        return 1;
+    }
+
+    int screen = DefaultScreen(app.display);
+    app.width = 1000;
+    app.height = 650;
+    app.background = BlackPixel(app.display, screen);
+    app.foreground = WhitePixel(app.display, screen);
+    app.tab_background = named_color(app.display, screen, "#202632", app.background);
+    app.active_tab_background = named_color(app.display, screen, "#30445c", app.tab_background);
+    app.accent = named_color(app.display, screen, "#56b6c2", app.foreground);
+    app.prompt_color = named_color(app.display, screen, "#55d98a", app.foreground);
+    app.border_color = named_color(app.display, screen, "#465366", app.foreground);
+    app.window = XCreateSimpleWindow(app.display, RootWindow(app.display, screen),
+                                     80, 60, (unsigned)app.width, (unsigned)app.height,
+                                     1, app.foreground, app.background);
+    XStoreName(app.display, app.window, "Terminator");
+    XSelectInput(app.display, app.window,
+                 ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
+
+    // Load scalable font
+app.font = XftFontOpenName(app.display,screen,"DejaVu Sans Mono:size=16");
+
+if (app.font == NULL) {
+    fprintf(stderr, "Could not load Xft font\n");
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Create Xft drawing context
+app.xft_draw = XftDrawCreate(app.display,app.window,DefaultVisual(app.display, screen),
+    DefaultColormap(app.display, screen));
+
+if (app.xft_draw == NULL) {
+    fprintf(stderr, "Could not create Xft drawing context\n");
+    XftFontClose(app.display, app.font);
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Allocate text colors
+if (!allocate_xft_color(app.display, screen, "#ffffff",
+                        &app.xft_foreground) ||
+    !allocate_xft_color(app.display, screen, "#55d98a",
+                        &app.xft_prompt_color) ||
+    !allocate_xft_color(app.display, screen, "#56b6c2",
+                        &app.xft_accent)) {
+
+    fprintf(stderr, "Could not allocate Xft colors\n");
+
+    XftDrawDestroy(app.xft_draw);
+    XftFontClose(app.display, app.font);
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 1;
+}
+
+// Keep GC for existing X11 rectangle and line drawing
+    app.gc = XCreateGC(app.display, app.window, 0, NULL);
+    XSetForeground(app.display, app.gc, app.foreground);
+    XMapWindow(app.display, app.window);
+
+    app.running = 1;
+    app.tab_count = 1;
+    app.active_tab = 0;
+    app.tabs[0].alive = 1;
+    app.tabs[0].history_index = -1;
+    if (getcwd(app.tabs[0].cwd, sizeof(app.tabs[0].cwd)) == NULL)
+        snprintf(app.tabs[0].cwd, sizeof(app.tabs[0].cwd), "/");
+    tab_append(&app.tabs[0], "Terminator - a small terminal written in C and Xlib\n");
+    tab_append(&app.tabs[0], "Type commands. Ctrl+T opens a tab; Alt+1..Alt+8 switches tabs.\n\n");
+
+    gui_run(&app);
+
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_foreground);
+
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_prompt_color);
+
+    XftColorFree(app.display,DefaultVisual(app.display, screen),DefaultColormap(app.display, screen),
+             &app.xft_accent);
+
+    XftDrawDestroy(app.xft_draw);
+    XftFontClose(app.display, app.font);
+    XFreeGC(app.display, app.gc);
+
+    XDestroyWindow(app.display, app.window);
+    XCloseDisplay(app.display);
+    history_save(&app);
+    history_free(&app);
+    return 0;
+}
