@@ -14,19 +14,10 @@ static unsigned long named_color(Display *display, int screen, const char *name,
     return fallback;
 }
 
-static int allocate_xft_color(
-    Display *display,
-    int screen,
-    const char *name,
-    XftColor *color)
+static int allocate_xft_color(Display *display,int screen,const char *name,XftColor *color)
 {
-    return XftColorAllocName(
-        display,
-        DefaultVisual(display, screen),
-        DefaultColormap(display, screen),
-        name,
-        color
-    );
+    return XftColorAllocName(display,DefaultVisual(display, screen),DefaultColormap(display, screen),
+        name,color);
 }
 
 int main(void)
@@ -59,11 +50,7 @@ int main(void)
                  ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
 
     // Load scalable font
-app.font = XftFontOpenName(
-    app.display,
-    screen,
-    "DejaVu Sans Mono:size=16"
-);
+app.font = XftFontOpenName(app.display,screen,"DejaVu Sans Mono:size=16");
 
 if (app.font == NULL) {
     fprintf(stderr, "Could not load Xft font\n");
@@ -75,12 +62,8 @@ if (app.font == NULL) {
 }
 
 // Create Xft drawing context
-app.xft_draw = XftDrawCreate(
-    app.display,
-    app.window,
-    DefaultVisual(app.display, screen),
-    DefaultColormap(app.display, screen)
-);
+app.xft_draw = XftDrawCreate(app.display,app.window,DefaultVisual(app.display, screen),
+    DefaultColormap(app.display, screen));
 
 if (app.xft_draw == NULL) {
     fprintf(stderr, "Could not create Xft drawing context\n");
@@ -112,8 +95,8 @@ if (!allocate_xft_color(app.display, screen, "#ffffff",
 }
 
 // Keep GC for existing X11 rectangle and line drawing
-app.gc = XCreateGC(app.display, app.window, 0, NULL);
-XSetForeground(app.display, app.gc, app.foreground);
+    app.gc = XCreateGC(app.display, app.window, 0, NULL);
+    XSetForeground(app.display, app.gc, app.foreground);
     XMapWindow(app.display, app.window);
 
     app.running = 1;

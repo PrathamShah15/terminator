@@ -533,27 +533,51 @@ int parser_execute_pipeline(App *app, Tab *tab, const char *line)
 
     if (background) {
         int slot = find_free_job(app);
+
         if (slot < 0) {
             tab_append(tab, "terminator: job table is full\n");
-            (void)kill(-pgid, SIGTERM);
+
+            // Terminate the complete pipeline process group.
+            if (pgid > 0)
+                (void)kill(-pgid, SIGTERM);
+
+            // Close the output pipe.
             close(output_pipe[0]);
-            for (int i = 0; i < started; i++)
-                waitpid(children[i], NULL, 0);
-        } else {
+
+            // Reap every child to prevent zombie processes.
+            for (int i = 0; i < started; i++) {
+                pid_t result;
+
+                do {
+                    result = waitpid(children[i], NULL, 0);
+                } while (result < 0 && errno == EINTR);
+            }
+
+            status = 1;
+        }
+        else {
             Job *job = &app->jobs[slot];
+
             job->pgid = pgid;
             job->output_fd = output_pipe[0];
             job->active = 1;
             job->stopped = 0;
             job->tab_index = app->active_tab;
-            snprintf(job->command, sizeof(job->command), "%s", command_line);
+
+            snprintf(job->command, sizeof(job->command),
+                    "%s", command_line);
+
             char message[INPUT_CAP + 64];
-            snprintf(message, sizeof(message), "[%d] %ld\n", slot + 1, (long)pgid);
+
+            snprintf(message, sizeof(message), "[%d] %ld\n",
+                    slot + 1, (long)pgid);
+
             tab_append(tab, message);
         }
-    } else {
+    }
+    else {
         int stopped = 0;
-        status = wait_foreground(app, tab, pgid, output_pipe[0], command_line, &stopped);
+        status = wait_foreground(app,tab,pgid,output_pipe[0],command_line,&stopped);
     }
 
     free_commands(commands, count);

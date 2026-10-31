@@ -13,13 +13,11 @@
 #define TAB_WIDTH 220
 #define PLUS_WIDTH 48
 
-typedef struct { char *text; int length; } DisplayLine;
+typedef struct {char *text; int length;} DisplayLine;
 
 static int font_height(const App *app)
 {
-    return app->font
-        ? app->font->ascent + app->font->descent
-        : 18;
+    return app->font ? app->font->ascent + app->font->descent : 18;
 }
 
 static int line_height(const App *app)
