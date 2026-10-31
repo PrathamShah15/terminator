@@ -11,6 +11,8 @@ void tab_append(Tab *tab, const char *text)
     size_t length = strlen(text);
     if (length == 0) return;
 
+    // If incoming text itself exceeds the buffer,
+    // retain only its last OUTPUT_CAP - 1 bytes.
     if (length >= OUTPUT_CAP) {
         text += length - (OUTPUT_CAP - 1);
         length = OUTPUT_CAP - 1;
@@ -18,13 +20,15 @@ void tab_append(Tab *tab, const char *text)
     }
     else if (length + tab->output_len >= OUTPUT_CAP) {
 
+        // Calculate how much old output must be removed.
         size_t remove = length + tab->output_len - (OUTPUT_CAP - 1);
         memmove(tab->output,tab->output + remove,tab->output_len - remove);
         tab->output_len -= remove;
     }
-
+    // Append the new text.
     memcpy(tab->output + tab->output_len,text,length);
     tab->output_len += length;
+    // Always maintain null termination.
     tab->output[tab->output_len] = '\0';
 }
 
