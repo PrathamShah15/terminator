@@ -254,6 +254,7 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
     int final_status = 0;
     *was_stopped = 0;
     app->foreground_pgid = pgid;
+    app->foreground_tab_index = (int)(tab - app->tabs);
 
     while (!group_done && !*was_stopped) {
         struct pollfd fds[2];
@@ -262,6 +263,7 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
         fds[1].fd = output_open ? output_fd : -1;
         fds[1].events = POLLIN | POLLHUP;
         (void)poll(fds, 2, 50);
+        int frame_changed = 0;
 
         if (fds[1].revents & (POLLIN | POLLHUP)) {
             char buffer[2048];
@@ -272,6 +274,7 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
                 memcpy(chunk, buffer, (size_t)bytes);
                 chunk[bytes] = '\0';
                 tab_append(tab, chunk);
+                frame_changed = 1;
             }
             if (bytes == 0)
                 output_open = 0;
@@ -280,24 +283,64 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
         while (XPending(app->display)) {
             XEvent event;
             XNextEvent(app->display, &event);
-            if (event.type == KeyPress &&
-                (event.xkey.state & ControlMask)) {
+            if (event.type == KeyPress) {
+                char text[32] = "";
                 KeySym key;
-                char text[8];
-                XLookupString(&event.xkey, text, sizeof(text), &key, NULL);
-                if (key == XK_c || key == XK_C) {
+                int length = XLookupString(&event.xkey, text,
+                                           (int)sizeof(text) - 1, &key, NULL);
+                if (length < 0) length = 0;
+                text[length] = '\0';
+                int is_foreground_tab = app->active_tab == app->foreground_tab_index;
+                if (is_foreground_tab && (event.xkey.state & ControlMask) &&
+                    (key == XK_c || key == XK_C)) {
                     tab_append(tab, "^C\n");
                     (void)kill(-pgid, SIGINT);
-                } else if (key == XK_z || key == XK_Z) {
+                } else if (is_foreground_tab && (event.xkey.state & ControlMask) &&
+                           (key == XK_z || key == XK_Z)) {
                     tab_append(tab, "^Z\n");
                     (void)kill(-pgid, SIGTSTP);
+                } else {
+                    /* Keep other tabs interactive while this tab has a foreground job. */
+                    (void)hotkey_handle(app, &event.xkey, key, text, length);
                 }
+                frame_changed = 1;
+            } else if (event.type == ButtonPress) {
+                if (event.xbutton.y < 42 && event.xbutton.button == Button1) {
+                    int x = event.xbutton.x;
+                    int tab_index = (x - 6) / 220;
+                    int local_x = (x - 6) % 220;
+                    if (x >= 6 && tab_index >= 0 && tab_index < app->tab_count) {
+                        /* Do not close tabs while a foreground wait holds a Tab pointer. */
+                        if (local_x >= 185 && local_x <= 200) {
+                            close_tab(app, tab_index);
+                        } else {
+                            app->active_tab = tab_index;
+                        }
+                    } else if (x >= app->tab_count * 220 + 7 &&
+                               x < app->tab_count * 220 + 55 &&
+                               app->tab_count < MAX_TABS) {
+                        int index = app->tab_count++;
+                        memset(&app->tabs[index], 0, sizeof(app->tabs[index]));
+                        app->tabs[index].alive = 1;
+                        app->tabs[index].history_index = -1;
+                        if (getcwd(app->tabs[index].cwd, sizeof(app->tabs[index].cwd)) == NULL)
+                            snprintf(app->tabs[index].cwd, sizeof(app->tabs[index].cwd), "/");
+                        app->active_tab = index;
+                    }
+                } else if (event.xbutton.button == Button4) {
+                    app->tabs[app->active_tab].scroll_offset += 3;
+                } else if (event.xbutton.button == Button5) {
+                    app->tabs[app->active_tab].scroll_offset -= 3;
+                    if (app->tabs[app->active_tab].scroll_offset < 0)
+                        app->tabs[app->active_tab].scroll_offset = 0;
+                }
+                frame_changed = 1;
             } else if (event.type == Expose) {
-                gui_redraw(app);
+                frame_changed = 1;
             } else if (event.type == ConfigureNotify) {
                 app->width = event.xconfigure.width;
                 app->height = event.xconfigure.height;
-                gui_redraw(app);
+                frame_changed = 1;
             }
         }
 
@@ -320,10 +363,12 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
 
         if (result < 0 && errno == ECHILD)
             group_done = 1;
-        gui_redraw(app);
+        if (frame_changed)
+            gui_redraw(app);
     }
 
     app->foreground_pgid = 0;
+    app->foreground_tab_index = -1;
     if (*was_stopped) {
         int slot = find_free_job(app);
         if (slot >= 0) {
@@ -482,6 +527,14 @@ int parser_execute_pipeline(App *app, Tab *tab, const char *line)
             }
             close(output_pipe[0]);
             close(output_pipe[1]);
+
+            if (i == 0 && background && commands[i].input_file == NULL) {
+                int null_fd = open("/dev/null", O_RDONLY);
+                if (null_fd >= 0) {
+                    (void)dup2(null_fd, STDIN_FILENO);
+                    close(null_fd);
+                }
+            }
 
             if (commands[i].input_file != NULL) {
                 int fd = open(commands[i].input_file, O_RDONLY);

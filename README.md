@@ -155,3 +155,69 @@ multiWatch ["date +%T", "ls | wc -l"]
 ```
 
 The compact example spellings `date+%T` and `wc-l` are also accepted and normalized to `date +%T` and `wc -l`.
+
+
+## New interactive features
+
+### Searchable command history (Task 9)
+
+- Command history is shared by all tabs and persisted in `~/.terminator_history`.
+- The history store retains up to 10,000 commands.
+- `history` displays the most recent 1,000 commands.
+- Press `Ctrl+R`, type a search term, and press Enter:
+  - The most recent exact command match is printed first.
+  - If there is no exact match, commands with the globally longest common substring are printed, provided that substring is longer than two characters.
+  - Otherwise, a no-match message is printed.
+- Press Escape to cancel a search.
+
+### File-name completion (Task 10)
+
+- Press Tab to complete the word immediately before the cursor.
+- Completion searches the active tab's current working directory (or the directory component typed in the word).
+- Matching filenames are shown below the input line.
+- Repeated Tab presses cycle through the matches and highlight the current choice.
+- The first Enter accepts the highlighted filename into the input line; a second Enter executes the command.
+- Escape cancels the candidate list; no match leaves the input unchanged.
+- Text after the cursor is preserved.
+
+### X11 clipboard shortcuts
+
+- `Ctrl+Shift+C` copies the current command input line to the X11 `CLIPBOARD` and `PRIMARY` selections.
+- `Ctrl+Shift+V` requests the `CLIPBOARD` selection and inserts the received text at the cursor.
+- This version copies the current input line; mouse-based selection of arbitrary terminal output is not implemented.
+
+### Background jobs and `sleep`
+
+Append `&` to run a command in the background, for example:
+
+```sh
+sleep 100 &
+```
+
+The prompt remains available while that job runs. Background commands without explicit input redirection receive `/dev/null` as standard input so they cannot consume input from the launching terminal.
+
+Without `&`, `sleep 100` is a foreground command. While it runs, Terminator continues processing X11 events: you can switch tabs and edit another tab's input line. Enter is held until the foreground command completes. Ctrl+C and Ctrl+Z are delivered to the foreground process group in its own tab. This project currently uses direct `fork`/`execvp` execution with pipes, not a pseudo-terminal (PTY); therefore interactive foreground child programs that read from a terminal are not supported like they are in a full terminal emulator.
+
+## Build
+
+On Arch Linux, install the development dependencies:
+
+```sh
+sudo pacman -S --needed gcc make pkgconf libx11 libxft fontconfig
+```
+
+Then build and run:
+
+```sh
+make clean
+make
+./terminator
+```
+
+
+## Rendering stability
+
+The GUI now renders complete frames into an off-screen X11 Pixmap and copies
+the finished frame to the window in one operation. Idle windows are event
+driven rather than being cleared and redrawn every 100 ms. Background jobs
+and multiWatch retain periodic polling so arriving output remains visible.

@@ -17,6 +17,7 @@
 #define MAX_JOBS 32
 #define MAX_WATCH_COMMANDS 16
 #define WATCH_OUTPUT_CAP 8192
+#define MAX_COMPLETIONS 128
 
 typedef struct {
     char cwd[PATH_MAX];
@@ -67,6 +68,9 @@ typedef struct {
 
     XftFont *font;
     XftDraw *xft_draw;
+    Pixmap backbuffer;
+    int backbuffer_width;
+    int backbuffer_height;
 
     XftColor xft_foreground;
     XftColor xft_prompt_color;
@@ -90,9 +94,29 @@ typedef struct {
     int history_capacity;
     int exit_requested;
     pid_t foreground_pgid;
+    int foreground_tab_index;
     Job jobs[MAX_JOBS];
     int next_job_id;
     MultiWatch multiwatch;
+
+    /* Ctrl+R searchable-history state */
+    int history_search_mode;
+    char history_search[INPUT_CAP];
+
+    /* Tab-completion candidate state */
+    char **completion_matches;
+    int completion_count;
+    int completion_active;
+    int completion_selected;
+    size_t completion_start;
+    size_t completion_end;
+
+    /* X11 CLIPBOARD selection owned by this application */
+    char *clipboard_text;
+    Atom clipboard_atom;
+    Atom utf8_string_atom;
+    Atom targets_atom;
+    Atom paste_property;
 } App;
 
 void gui_run(App *app);
@@ -103,6 +127,7 @@ int parser_execute_pipeline(App *app, Tab *tab, const char *line);
 int job_control_builtin(App *app, Tab *tab, const char *line);
 void jobs_poll(App *app);
 int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int text_len);
+void hotkeys_cleanup(App *app);
 void tab_append(Tab *tab, const char *text);
 void tab_clear(Tab *tab);
 void history_add(App *app, const char *line);
@@ -112,5 +137,6 @@ void history_free(App *app);
 int multiwatch_start(App *app, Tab *tab, const char *arguments);
 void multiwatch_poll(App *app);
 void multiwatch_stop(App *app);
+void close_tab(App *app, int index);
 
 #endif

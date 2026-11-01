@@ -1,8 +1,237 @@
 #include "terminator.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <limits.h>
+#include <X11/Xatom.h>
+#include <ctype.h>
 
+
+
+static void clear_completions(App *app)
+{
+    for (int i = 0; i < app->completion_count; i++)
+        free(app->completion_matches[i]);
+    free(app->completion_matches);
+    app->completion_matches = NULL;
+    app->completion_count = 0;
+    app->completion_active = 0;
+}
+
+static void replace_input_range(Tab *tab, size_t start, size_t end,
+                                const char *replacement)
+{
+    size_t old_length = strlen(tab->input);
+    size_t replacement_length = strlen(replacement);
+    if (start > end || end > old_length ||
+        old_length - (end - start) + replacement_length >= sizeof(tab->input))
+        return;
+
+    memmove(tab->input + start + replacement_length, tab->input + end,
+            old_length - end + 1);
+    memcpy(tab->input + start, replacement, replacement_length);
+    tab->cursor = start + replacement_length;
+}
+
+
+
+static void filename_completion(App *app, Tab *tab)
+{
+    clear_completions(app);
+
+    size_t cursor = tab->cursor;
+    size_t start = cursor;
+    while (start > 0 && !isspace((unsigned char)tab->input[start - 1]) &&
+           tab->input[start - 1] != '|' && tab->input[start - 1] != '<' &&
+           tab->input[start - 1] != '>')
+        start--;
+
+    char typed[PATH_MAX];
+    size_t typed_length = cursor - start;
+    if (typed_length == 0 || typed_length >= sizeof(typed))
+        return;
+    memcpy(typed, tab->input + start, typed_length);
+    typed[typed_length] = '\0';
+
+    char directory_part[PATH_MAX] = "";
+    const char *base = typed;
+    const char *slash = strrchr(typed, '/');
+    if (slash != NULL) {
+        size_t dir_length = (size_t)(slash - typed + 1);
+        if (dir_length >= sizeof(directory_part)) return;
+        memcpy(directory_part, typed, dir_length);
+        directory_part[dir_length] = '\0';
+        base = slash + 1;
+    }
+
+    char search_directory[PATH_MAX];
+    if (directory_part[0] == '/') {
+        size_t dir_len = strlen(directory_part);
+
+        if (dir_len >= sizeof(search_directory))
+            return;
+
+        memcpy(search_directory, directory_part, dir_len + 1);
+    } else {
+        const char *cwd = tab->cwd[0] ? tab->cwd : ".";
+
+        size_t cwd_len = strlen(cwd);
+        size_t dir_len = strlen(directory_part);
+
+        if (cwd_len + 1 + dir_len >= sizeof(search_directory))
+            return;
+
+        memcpy(search_directory, cwd, cwd_len);
+        search_directory[cwd_len] = '/';
+
+        memcpy(search_directory + cwd_len + 1,
+               directory_part, dir_len + 1);
+    }
+    /* opendir() accepts a trailing slash and ".". */
+    DIR *directory = opendir(search_directory);
+    if (directory == NULL)
+        return;
+
+    size_t base_length = strlen(base);
+    struct dirent *entry;
+    char **matches = calloc(MAX_COMPLETIONS, sizeof(*matches));
+    if (matches == NULL) {
+        closedir(directory);
+        return;
+    }
+
+    int count = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strncmp(entry->d_name, base, base_length) != 0)
+            continue;
+        if (entry->d_name[0] == '.' && (base_length == 0 || base[0] != '.'))
+            continue;
+        if (count >= MAX_COMPLETIONS)
+            break;
+
+        char candidate[PATH_MAX];
+        int written = snprintf(candidate, sizeof(candidate), "%s%s",
+                               directory_part, entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(candidate))
+            continue;
+        matches[count] = strdup(candidate);
+        if (matches[count] != NULL)
+            count++;
+    }
+    closedir(directory);
+
+    if (count == 0) {
+        free(matches);
+        return;
+    }
+
+    app->completion_matches = matches;
+    app->completion_count = count;
+    app->completion_start = start;
+    app->completion_end = cursor;
+
+    app->completion_active = 1;
+    app->completion_selected = 0;
+}
+
+static int longest_common_substring_length(const char *a, const char *b)
+{
+    size_t n = strlen(a), m = strlen(b);
+    if (n == 0 || m == 0) return 0;
+    int *previous = calloc(m + 1, sizeof(*previous));
+    int *current = calloc(m + 1, sizeof(*current));
+    if (previous == NULL || current == NULL) {
+        free(previous);
+        free(current);
+        return 0;
+    }
+
+    int best = 0;
+    for (size_t i = 1; i <= n; i++) {
+        memset(current, 0, (m + 1) * sizeof(*current));
+        for (size_t j = 1; j <= m; j++) {
+            if (a[i - 1] == b[j - 1]) {
+                current[j] = previous[j - 1] + 1;
+                if (current[j] > best) best = current[j];
+            }
+        }
+        int *tmp = previous;
+        previous = current;
+        current = tmp;
+    }
+    free(previous);
+    free(current);
+    return best;
+}
+
+static void execute_history_search(App *app, Tab *tab)
+{
+    const char *term = app->history_search;
+    int exact = -1;
+    for (int i = app->history_count - 1; i >= 0; i--) {
+        if (strcmp(app->history[i], term) == 0) {
+            exact = i;
+            break;
+        }
+    }
+
+    if (exact >= 0) {
+        tab_append(tab, app->history[exact]);
+        tab_append(tab, "\n");
+        return;
+    }
+
+    int best = 0;
+    for (int i = 0; i < app->history_count; i++) {
+        int length = longest_common_substring_length(app->history[i], term);
+        if (length > best) best = length;
+    }
+
+    if (best <= 2) {
+        tab_append(tab, "No match for search term in history\n");
+        return;
+    }
+
+    for (int i = 0; i < app->history_count; i++) {
+        if (longest_common_substring_length(app->history[i], term) == best) {
+            tab_append(tab, app->history[i]);
+            tab_append(tab, "\n");
+        }
+    }
+}
+
+static void begin_clipboard_copy(App *app, Tab *tab)
+{
+    free(app->clipboard_text);
+    app->clipboard_text = strdup(tab->input);
+    if (app->clipboard_text == NULL)
+        return;
+    XSetSelectionOwner(app->display, app->clipboard_atom,
+                       app->window, CurrentTime);
+    XSetSelectionOwner(app->display, XA_PRIMARY,
+                       app->window, CurrentTime);
+    XFlush(app->display);
+}
+
+static void begin_clipboard_paste(App *app)
+{
+    XConvertSelection(app->display, app->clipboard_atom,
+                      app->utf8_string_atom, app->paste_property,
+                      app->window, CurrentTime);
+    XFlush(app->display);
+}
+
+
+void hotkeys_cleanup(App *app)
+{
+    if (app == NULL) return;
+    clear_completions(app);
+    free(app->clipboard_text);
+    app->clipboard_text = NULL;
+}
 
 static int command_is_incomplete(const char *line)
 {
@@ -97,6 +326,80 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
     int control = (event->state & ControlMask) != 0;
     int alt = (event->state & Mod1Mask) != 0;
     (void)text_len;
+
+    int shift = (event->state & ShiftMask) != 0;
+
+    if (control && shift && (key == XK_c || key == XK_C)) {
+        begin_clipboard_copy(app, tab);
+        return 1;
+    }
+    if (control && shift && (key == XK_v || key == XK_V)) {
+        begin_clipboard_paste(app);
+        return 1;
+    }
+
+    if (app->completion_active) {
+        if (key == XK_Tab) {
+            app->completion_selected =
+                (app->completion_selected + 1) % app->completion_count;
+            return 1;
+        }
+        if (key == XK_Return || key == XK_KP_Enter) {
+            int selected = app->completion_selected;
+            if (selected >= 0 && selected < app->completion_count)
+                replace_input_range(tab, app->completion_start,
+                                    app->completion_end,
+                                    app->completion_matches[selected]);
+            clear_completions(app);
+            return 1; /* First Enter accepts; a second Enter executes. */
+        }
+        if (key == XK_Escape) {
+            clear_completions(app);
+            return 1;
+        }
+        clear_completions(app);
+    }
+
+    if (app->history_search_mode) {
+        if (key == XK_Return || key == XK_KP_Enter) {
+            tab_append(tab, app->history_search);
+            tab_append(tab, "\n");
+            execute_history_search(app, tab);
+            app->history_search_mode = 0;
+            app->history_search[0] = '\0';
+            return 1;
+        }
+        if (key == XK_BackSpace) {
+            size_t n = strlen(app->history_search);
+            if (n > 0) app->history_search[n - 1] = '\0';
+            return 1;
+        }
+        if (key == XK_Escape) {
+            app->history_search_mode = 0;
+            app->history_search[0] = '\0';
+            return 1;
+        }
+        if (!control && !alt && text != NULL && text_len > 0 &&
+            (unsigned char)text[0] >= 32) {
+            size_t n = strlen(app->history_search);
+            if (n + (size_t)text_len < sizeof(app->history_search))
+                memcpy(app->history_search + n, text, (size_t)text_len),
+                app->history_search[n + (size_t)text_len] = '\0';
+            return 1;
+        }
+        return 1;
+    }
+
+    if (control && key == XK_r) {
+        app->history_search_mode = 1;
+        app->history_search[0] = '\0';
+        return 1;
+    }
+
+    if (key == XK_Tab) {
+        filename_completion(app, tab);
+        return 1;
+    }
 
     if (alt && key >= XK_1 && key <= XK_8) {
         int target = (int)(key - XK_1);
@@ -213,6 +516,10 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         return 1;
     }
     if (key == XK_Return || key == XK_KP_Enter) {
+        if (app->foreground_pgid > 0) {
+            tab_append(tab, "\nterminator: wait for the foreground command to finish first\n");
+            return 1;
+        }
         tab->scroll_offset = 0;
         char prompt[PATH_MAX + 64];
 

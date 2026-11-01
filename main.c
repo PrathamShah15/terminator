@@ -46,6 +46,11 @@ int main(void)
                                      80, 60, (unsigned)app.width, (unsigned)app.height,
                                      1, app.foreground, app.background);
     XStoreName(app.display, app.window, "Terminator");
+
+    app.clipboard_atom = XInternAtom(app.display, "CLIPBOARD", False);
+    app.utf8_string_atom = XInternAtom(app.display, "UTF8_STRING", False);
+    app.targets_atom = XInternAtom(app.display, "TARGETS", False);
+    app.paste_property = XInternAtom(app.display, "TERMINATOR_CLIPBOARD", False);
     XSelectInput(app.display, app.window,
                  ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
 
@@ -121,12 +126,15 @@ if (!allocate_xft_color(app.display, screen, "#ffffff",
              &app.xft_accent);
 
     XftDrawDestroy(app.xft_draw);
+    if (app.backbuffer != None)
+        XFreePixmap(app.display, app.backbuffer);
     XftFontClose(app.display, app.font);
     XFreeGC(app.display, app.gc);
 
     XDestroyWindow(app.display, app.window);
-    XCloseDisplay(app.display);
     history_save(&app);
     history_free(&app);
+    hotkeys_cleanup(&app);
+    XCloseDisplay(app.display);
     return 0;
 }

@@ -1,5 +1,6 @@
 #include "terminator.h"
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,15 +107,15 @@ static int wrap_output(App *app, DisplayLine **lines, size_t *count, size_t *cap
 static void draw_tab_bar(App *app)
 {
     XSetForeground(app->display, app->gc, app->tab_background);
-    XFillRectangle(app->display, app->window, app->gc, 0, 0, (unsigned)app->width, TAB_BAR_HEIGHT);
+    XFillRectangle(app->display, app->backbuffer, app->gc, 0, 0, (unsigned)app->width, TAB_BAR_HEIGHT);
     XSetForeground(app->display, app->gc, app->border_color);
-    XDrawLine(app->display, app->window, app->gc, 0, TAB_BAR_HEIGHT - 1, app->width, TAB_BAR_HEIGHT - 1);
+    XDrawLine(app->display, app->backbuffer, app->gc, 0, TAB_BAR_HEIGHT - 1, app->width, TAB_BAR_HEIGHT - 1);
     for (int i = 0; i < app->tab_count; i++) {
         int x = i * TAB_WIDTH + 6, width = TAB_WIDTH - 5;
         XSetForeground(app->display, app->gc, i == app->active_tab ? app->active_tab_background : app->tab_background);
-        XFillRectangle(app->display, app->window, app->gc, x, 5, (unsigned)width, TAB_BAR_HEIGHT - 11);
+        XFillRectangle(app->display, app->backbuffer, app->gc, x, 5, (unsigned)width, TAB_BAR_HEIGHT - 11);
         XSetForeground(app->display, app->gc, app->border_color);
-        XDrawRectangle(app->display, app->window, app->gc, x, 5, (unsigned)width, TAB_BAR_HEIGHT - 11);
+        XDrawRectangle(app->display, app->backbuffer, app->gc, x, 5, (unsigned)width, TAB_BAR_HEIGHT - 11);
         XSetForeground(app->display, app->gc, i == app->active_tab ? app->accent : app->foreground);
         char label[32]; snprintf(label, sizeof(label), "%d  %s", i + 1, i == app->active_tab ? "Terminal" : "Tab");
         draw_text(app,x+10,27,label,(int)strlen(label),i == app->active_tab
@@ -143,9 +144,9 @@ static void draw_tab_bar(App *app)
     int plus_x = app->tab_count * TAB_WIDTH + 7;
     if (plus_x + PLUS_WIDTH < app->width) {
         XSetForeground(app->display, app->gc, app->tab_background);
-        XFillRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
+        XFillRectangle(app->display, app->backbuffer, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
         XSetForeground(app->display, app->gc, app->accent);
-        XDrawRectangle(app->display, app->window, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
+        XDrawRectangle(app->display, app->backbuffer, app->gc, plus_x, 5, PLUS_WIDTH - 5, TAB_BAR_HEIGHT - 11);
         int plus_width = text_width(app, "+", 1);
         int text_x = plus_x + (32 - plus_width) / 2 + 6;
         int text_y = 27;
@@ -165,7 +166,7 @@ static void create_tab(App *app)
     app->active_tab = index;
 }
 
-static void close_tab(App *app, int index)
+void close_tab(App *app, int index)
 {
     if (index < 0 || index >= app->tab_count) return;
     if (app->tab_count == 1) { app->running = 0; return; }
@@ -181,18 +182,50 @@ void gui_redraw(App *app)
     if (app->tab_count <= 0) return;
     if (app->active_tab < 0 || app->active_tab >= app->tab_count) app->active_tab = 0;
     Tab *tab = &app->tabs[app->active_tab];
-    XClearWindow(app->display, app->window);
+    /*
+     * Render into an off-screen pixmap. The window is updated only once the
+     * complete frame is ready, preventing the clear-then-redraw flash.
+     */
+    if (app->backbuffer == None ||
+        app->backbuffer_width != app->width ||
+        app->backbuffer_height != app->height) {
+        Pixmap old_backbuffer = app->backbuffer;
+        app->backbuffer = XCreatePixmap(app->display, app->window,
+                                        (unsigned)app->width,
+                                        (unsigned)app->height,
+                                        (unsigned)DefaultDepth(app->display,
+                                            DefaultScreen(app->display)));
+        if (app->backbuffer == None)
+            return;
+        app->backbuffer_width = app->width;
+        app->backbuffer_height = app->height;
+        if (app->xft_draw != NULL)
+            XftDrawChange(app->xft_draw, app->backbuffer);
+        if (old_backbuffer != None)
+            XFreePixmap(app->display, old_backbuffer);
+    }
+
+    XSetForeground(app->display, app->gc, app->background);
+    XFillRectangle(app->display, app->backbuffer, app->gc, 0, 0,
+                   (unsigned)app->width, (unsigned)app->height);
     draw_tab_bar(app);
     int available_width = app->width - LEFT_MARGIN * 2;
     if (available_width < 1) available_width = 1;
     DisplayLine *lines = NULL; size_t count = 0, capacity = 0;
     if (wrap_output(app, &lines, &count, &capacity, available_width) != 0) { free_lines(lines, count); XFlush(app->display); return; }
     char prompt[PATH_MAX + 64];
-    if (tab->continuing) snprintf(prompt, sizeof(prompt), "> ");
-    else snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", tab->cwd);
+    const char *visible_input = tab->input;
+    if (app->history_search_mode) {
+        snprintf(prompt, sizeof(prompt), "Enter search term: ");
+        visible_input = app->history_search;
+    } else if (tab->continuing) {
+        snprintf(prompt, sizeof(prompt), "> ");
+    } else {
+        snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", tab->cwd);
+    }
     char input_line[PATH_MAX + INPUT_CAP + 128];
-    snprintf(input_line, sizeof(input_line), "%s%s", prompt, tab->input);
-    size_t prompt_length = strlen(prompt), cursor_position = prompt_length + tab->cursor;
+    snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
+    size_t prompt_length = strlen(prompt), cursor_position = prompt_length + (app->history_search_mode ? strlen(app->history_search) : tab->cursor);
     size_t input_start_index = count;
     if (wrap_text(app, &lines, &count, &capacity, input_line, strlen(input_line), available_width) != 0) { free_lines(lines, count); XFlush(app->display); return; }
 
@@ -238,47 +271,201 @@ void gui_redraw(App *app)
             size_t in_line = cursor_position - global_start;
             int cursor_x = LEFT_MARGIN + text_width(app, line, (int)in_line);
             XSetForeground(app->display, app->gc, app->accent);
-            XDrawLine(app->display, app->window, app->gc, cursor_x, y - font_height(app) + 4, cursor_x, y + 4);
+            XDrawLine(app->display, app->backbuffer, app->gc, cursor_x, y - font_height(app) + 4, cursor_x, y + 4);
         }
         y += line_height(app);
     }
-    free_lines(lines, count); XFlush(app->display);
+    /* Render filename candidates below the input line, with the active item highlighted. */
+    if (app->completion_active && app->completion_count > 0) {
+        int visible = app->completion_count;
+        int max_visible = (app->height - y - 8) / line_height(app);
+        if (max_visible < 1) max_visible = 1;
+        if (visible > max_visible) visible = max_visible;
+        for (int i = 0; i < visible; i++) {
+            int row_y = y + i * line_height(app);
+            if (i == app->completion_selected) {
+                XSetForeground(app->display, app->gc, app->active_tab_background);
+                XFillRectangle(app->display, app->backbuffer, app->gc,
+                               LEFT_MARGIN - 4, row_y - font_height(app) + 3,
+                               (unsigned)(app->width - LEFT_MARGIN * 2),
+                               (unsigned)line_height(app));
+            }
+            char candidate[PATH_MAX + 32];
+            snprintf(candidate, sizeof(candidate), "%s%s",
+                     i == app->completion_selected ? "> " : "  ",
+                     app->completion_matches[i]);
+            draw_text(app, LEFT_MARGIN, row_y, candidate, (int)strlen(candidate),
+                      i == app->completion_selected ? &app->xft_accent : &app->xft_foreground);
+        }
+    }
+    free_lines(lines, count);
+    XCopyArea(app->display, app->backbuffer, app->window, app->gc,
+              0, 0, (unsigned)app->width, (unsigned)app->height, 0, 0);
+    XFlush(app->display);
+}
+
+
+static void handle_selection_request(App *app, XSelectionRequestEvent *request)
+{
+    XSelectionEvent response;
+    memset(&response, 0, sizeof(response));
+    response.type = SelectionNotify;
+    response.display = request->display;
+    response.requestor = request->requestor;
+    response.selection = request->selection;
+    response.target = request->target;
+    response.time = request->time;
+    response.property = request->property == None
+                      ? request->target : request->property;
+
+    if (request->target == app->targets_atom) {
+        Atom targets[] = { app->targets_atom, app->utf8_string_atom, XA_STRING };
+        XChangeProperty(app->display, request->requestor, request->property,
+                        XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)targets, 3);
+    } else if (request->target == app->utf8_string_atom ||
+               request->target == XA_STRING) {
+        if (app->clipboard_text == NULL) {
+            response.property = None;
+        } else {
+            XChangeProperty(app->display, request->requestor,
+                            request->property, request->target, 8,
+                            PropModeReplace,
+                            (unsigned char *)app->clipboard_text,
+                            (int)strlen(app->clipboard_text));
+        }
+    } else {
+        response.property = None;
+    }
+
+    XSendEvent(app->display, request->requestor, False, 0,
+               (XEvent *)&response);
+    XFlush(app->display);
+}
+
+static void handle_selection_notify(App *app, XSelectionEvent *event)
+{
+    if (event->property == None)
+        return;
+
+    Atom actual_type;
+    int actual_format;
+    unsigned long count, remaining;
+    unsigned char *data = NULL;
+
+    if (XGetWindowProperty(app->display, app->window, event->property,
+                           0, INPUT_CAP, False, AnyPropertyType,
+                           &actual_type, &actual_format, &count,
+                           &remaining, &data) == Success &&
+        data != NULL && actual_format == 8 &&
+        (actual_type == app->utf8_string_atom || actual_type == XA_STRING)) {
+        Tab *tab = &app->tabs[app->active_tab];
+        size_t old_length = strlen(tab->input);
+        size_t insert_length = (size_t)count;
+        if (insert_length > sizeof(tab->input) - old_length - 1)
+            insert_length = sizeof(tab->input) - old_length - 1;
+        memmove(tab->input + tab->cursor + insert_length,
+                tab->input + tab->cursor,
+                old_length - tab->cursor + 1);
+        memcpy(tab->input + tab->cursor, data, insert_length);
+        tab->cursor += insert_length;
+        XFree(data);
+    } else if (data != NULL) {
+        XFree(data);
+    }
+    XDeleteProperty(app->display, app->window, event->property);
+}
+
+static int background_activity_exists(const App *app)
+{
+    if (app->multiwatch.active)
+        return 1;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (app->jobs[i].active)
+            return 1;
+    }
+    return 0;
 }
 
 void gui_run(App *app)
 {
     int x_fd = ConnectionNumber(app->display);
+
+    /* Initial frame. Thereafter, idle windows are not continuously redrawn. */
+    gui_redraw(app);
+
     while (app->running) {
         jobs_poll(app);
         multiwatch_poll(app);
-        gui_redraw(app);
+
         if (!XPending(app->display)) {
-            struct pollfd descriptor = { .fd = x_fd, .events = POLLIN, .revents = 0 };
-            (void)poll(&descriptor, 1, 100);
-            jobs_poll(app);
-            multiwatch_poll(app);
-            gui_redraw(app);
+            struct pollfd descriptor = {
+                .fd = x_fd,
+                .events = POLLIN,
+                .revents = 0
+            };
+            int timeout = background_activity_exists(app) ? 100 : -1;
+            (void)poll(&descriptor, 1, timeout);
+
+            if (background_activity_exists(app)) {
+                jobs_poll(app);
+                multiwatch_poll(app);
+                gui_redraw(app);
+            }
         }
+
         while (XPending(app->display)) {
-            XEvent event; XNextEvent(app->display, &event);
-            if (event.type == Expose) gui_redraw(app);
-            else if (event.type == ConfigureNotify) { app->width = event.xconfigure.width; app->height = event.xconfigure.height; gui_redraw(app); }
-            else if (event.type == ButtonPress) {
-                if (event.xbutton.y < TAB_BAR_HEIGHT && event.xbutton.button == Button1) {
+            XEvent event;
+            XNextEvent(app->display, &event);
+
+            if (event.type == SelectionRequest) {
+                handle_selection_request(app, &event.xselectionrequest);
+            } else if (event.type == SelectionNotify) {
+                handle_selection_notify(app, &event.xselection);
+                gui_redraw(app);
+            } else if (event.type == Expose) {
+                if (event.xexpose.count == 0)
+                    gui_redraw(app);
+            } else if (event.type == ConfigureNotify) {
+                app->width = event.xconfigure.width;
+                app->height = event.xconfigure.height;
+                gui_redraw(app);
+            } else if (event.type == ButtonPress) {
+                if (event.xbutton.y < TAB_BAR_HEIGHT &&
+                    event.xbutton.button == Button1) {
                     int x = event.xbutton.x;
                     int tab_index = (x - 6) / TAB_WIDTH;
                     int local_x = (x - 6) % TAB_WIDTH;
-                    if (x >= 6 && tab_index >= 0 && tab_index < app->tab_count) {
-                        if (local_x >= TAB_WIDTH - 25) close_tab(app, tab_index);
-                        else app->active_tab = tab_index;
-                    } else if (x >= app->tab_count * TAB_WIDTH + 7 && x < app->tab_count * TAB_WIDTH + PLUS_WIDTH + 7) create_tab(app);
-                } else if (event.xbutton.button == Button4) app->tabs[app->active_tab].scroll_offset += 3;
-                else if (event.xbutton.button == Button5) { app->tabs[app->active_tab].scroll_offset -= 3; if (app->tabs[app->active_tab].scroll_offset < 0) app->tabs[app->active_tab].scroll_offset = 0; }
+
+                    if (x >= 6 && tab_index >= 0 &&
+                        tab_index < app->tab_count) {
+                        if (local_x >= 185 && local_x <= 200)
+                            close_tab(app, tab_index);
+                        else
+                            app->active_tab = tab_index;
+                    } else if (x >= app->tab_count * TAB_WIDTH + 7 &&
+                               x < app->tab_count * TAB_WIDTH + PLUS_WIDTH + 7) {
+                        create_tab(app);
+                    }
+                } else if (event.xbutton.button == Button4) {
+                    app->tabs[app->active_tab].scroll_offset += 3;
+                } else if (event.xbutton.button == Button5) {
+                    app->tabs[app->active_tab].scroll_offset -= 3;
+                    if (app->tabs[app->active_tab].scroll_offset < 0)
+                        app->tabs[app->active_tab].scroll_offset = 0;
+                }
                 gui_redraw(app);
             } else if (event.type == KeyPress) {
-                char text[32] = ""; KeySym key;
-                int length = XLookupString(&event.xkey, text, sizeof(text) - 1, &key, NULL); text[length] = '\0';
-                if (app->multiwatch.active && (event.xkey.state & ControlMask) &&
+                char text[32] = "";
+                KeySym key;
+                int length = XLookupString(&event.xkey, text,
+                                           sizeof(text) - 1, &key, NULL);
+                if (length < 0)
+                    length = 0;
+                text[length] = '\0';
+
+                if (app->multiwatch.active &&
+                    (event.xkey.state & ControlMask) &&
                     (key == XK_c || key == XK_C)) {
                     multiwatch_stop(app);
                 } else {
@@ -288,6 +475,7 @@ void gui_run(App *app)
             }
         }
     }
+
     if (app->multiwatch.active)
         multiwatch_stop(app);
 }
