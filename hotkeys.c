@@ -205,15 +205,10 @@ static void execute_history_search(App *app, Tab *tab)
 
 static void begin_clipboard_copy(App *app, Tab *tab)
 {
-    free(app->clipboard_text);
-    app->clipboard_text = strdup(tab->input);
-    if (app->clipboard_text == NULL)
-        return;
-    XSetSelectionOwner(app->display, app->clipboard_atom,
-                       app->window, CurrentTime);
-    XSetSelectionOwner(app->display, XA_PRIMARY,
-                       app->window, CurrentTime);
-    XFlush(app->display);
+    /* Copy highlighted terminal output. Do not silently copy the prompt input. */
+    (void)tab;
+    if (app->selection_active)
+        gui_copy_selection(app);
 }
 
 static void begin_clipboard_paste(App *app)

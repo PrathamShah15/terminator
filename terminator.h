@@ -117,6 +117,14 @@ typedef struct {
     Atom utf8_string_atom;
     Atom targets_atom;
     Atom paste_property;
+
+    /* Mouse selection over rendered terminal output (visual wrapped lines). */
+    int selection_active;
+    int selecting;
+    int selection_anchor_line;
+    int selection_anchor_col;
+    int selection_end_line;
+    int selection_end_col;
 } App;
 
 void gui_run(App *app);
@@ -138,5 +146,6 @@ int multiwatch_start(App *app, Tab *tab, const char *arguments);
 void multiwatch_poll(App *app);
 void multiwatch_stop(App *app);
 void close_tab(App *app, int index);
+void gui_copy_selection(App *app);
 
 #endif

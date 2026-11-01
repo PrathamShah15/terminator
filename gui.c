@@ -177,6 +177,107 @@ void close_tab(App *app, int index)
     if (app->active_tab < 0) app->active_tab = 0;
 }
 
+
+/* Convert a mouse position into a wrapped output-line/character position. */
+static int selection_hit_test(App *app, DisplayLine *lines, size_t output_count,
+                              size_t output_start, size_t output_end,
+                              int x, int y, int *line_out, int *col_out)
+{
+    int first_y = CONTENT_TOP + font_height(app);
+    if (y < first_y) return 0;
+    int row = (y - first_y) / line_height(app);
+    size_t visible_count = output_end - output_start;
+    if (row < 0 || (size_t)row >= visible_count) return 0;
+
+    size_t line_index = output_start + (size_t)row;
+    if (line_index >= output_count) return 0;
+
+    int target_x = x - LEFT_MARGIN;
+    if (target_x < 0) target_x = 0;
+    int col = 0;
+    while (col < lines[line_index].length) {
+        int width = text_width(app, lines[line_index].text, col + 1);
+        if (width >= target_x) {
+            if (col > 0) {
+                int prev = text_width(app, lines[line_index].text, col);
+                if (target_x - prev > width - target_x) col++;
+            }
+            break;
+        }
+        col++;
+    }
+    *line_out = (int)line_index;
+    *col_out = col;
+    return 1;
+}
+
+static void selection_order(const App *app, int *sl, int *sc, int *el, int *ec)
+{
+    *sl = app->selection_anchor_line;
+    *sc = app->selection_anchor_col;
+    *el = app->selection_end_line;
+    *ec = app->selection_end_col;
+    if (*sl > *el || (*sl == *el && *sc > *ec)) {
+        int t = *sl; *sl = *el; *el = t;
+        t = *sc; *sc = *ec; *ec = t;
+    }
+}
+
+void gui_copy_selection(App *app)
+{
+    if (!app || !app->selection_active || app->tab_count <= 0) return;
+
+    Tab *tab = &app->tabs[app->active_tab];
+    int width = app->width - LEFT_MARGIN * 2;
+    if (width < 1) width = 1;
+    DisplayLine *lines = NULL;
+    size_t count = 0, capacity = 0;
+    if (wrap_output(app, &lines, &count, &capacity, width) != 0) {
+        free_lines(lines, count);
+        return;
+    }
+
+    int sl, sc, el, ec;
+    selection_order(app, &sl, &sc, &el, &ec);
+    if (sl < 0 || el < sl || (size_t)el >= count) {
+        free_lines(lines, count);
+        return;
+    }
+
+    size_t total = 1;
+    for (int i = sl; i <= el; i++) {
+        int a = i == sl ? sc : 0;
+        int b = i == el ? ec : lines[i].length;
+        if (a < 0) a = 0;
+        if (b > lines[i].length) b = lines[i].length;
+        if (b > a) total += (size_t)(b - a);
+        if (i != el) total++;
+    }
+    char *copy = malloc(total);
+    if (!copy) { free_lines(lines, count); return; }
+    size_t pos = 0;
+    for (int i = sl; i <= el; i++) {
+        int a = i == sl ? sc : 0;
+        int b = i == el ? ec : lines[i].length;
+        if (a < 0) a = 0;
+        if (b > lines[i].length) b = lines[i].length;
+        if (b > a) {
+            memcpy(copy + pos, lines[i].text + a, (size_t)(b - a));
+            pos += (size_t)(b - a);
+        }
+        if (i != el) copy[pos++] = '\n';
+    }
+    copy[pos] = '\0';
+
+    free(app->clipboard_text);
+    app->clipboard_text = copy;
+    XSetSelectionOwner(app->display, app->clipboard_atom, app->window, CurrentTime);
+    XSetSelectionOwner(app->display, XA_PRIMARY, app->window, CurrentTime);
+    XFlush(app->display);
+    free_lines(lines, count);
+    (void)tab;
+}
+
 void gui_redraw(App *app)
 {
     if (app->tab_count <= 0) return;
@@ -243,8 +344,40 @@ void gui_redraw(App *app)
     size_t output_start = output_end > output_rows ? output_end - output_rows : 0;
     int y = first_y;
     
+    int sel_sl = 0, sel_sc = 0, sel_el = 0, sel_ec = 0;
+    if (app->selection_active)
+        selection_order(app, &sel_sl, &sel_sc, &sel_el, &sel_ec);
     for (size_t i = output_start; i < output_end; i++) {
-        draw_text(app,LEFT_MARGIN,y,lines[i].text,lines[i].length,&app->xft_foreground);
+        int selected = app->selection_active &&
+                       (int)i >= sel_sl && (int)i <= sel_el;
+        if (selected) {
+            int a = (int)i == sel_sl ? sel_sc : 0;
+            int b = (int)i == sel_el ? sel_ec : lines[i].length;
+            if (a < 0) a = 0;
+            if (a > lines[i].length) a = lines[i].length;
+            if (b > lines[i].length) b = lines[i].length;
+            if (b > a) {
+                int sx = LEFT_MARGIN + text_width(app, lines[i].text, a);
+                int sw = text_width(app, lines[i].text + a, b - a);
+                XSetForeground(app->display, app->gc, app->active_tab_background);
+                XFillRectangle(app->display, app->backbuffer, app->gc,
+                               sx, y - font_height(app) + 3,
+                               (unsigned)(sw > 1 ? sw : 2),
+                               (unsigned)line_height(app));
+                draw_text(app, LEFT_MARGIN, y, lines[i].text, a,
+                          &app->xft_foreground);
+                draw_text(app, sx, y, lines[i].text + a, b - a,
+                          &app->xft_foreground);
+                draw_text(app, sx + sw, y, lines[i].text + b,
+                          lines[i].length - b, &app->xft_foreground);
+            } else {
+                draw_text(app, LEFT_MARGIN, y, lines[i].text,
+                          lines[i].length, &app->xft_foreground);
+            }
+        } else {
+            draw_text(app, LEFT_MARGIN, y, lines[i].text,
+                      lines[i].length, &app->xft_foreground);
+        }
         y += line_height(app);
     }
 
@@ -431,12 +564,13 @@ void gui_run(App *app)
                 app->height = event.xconfigure.height;
                 gui_redraw(app);
             } else if (event.type == ButtonPress) {
-                if (event.xbutton.y < TAB_BAR_HEIGHT &&
-                    event.xbutton.button == Button1) {
+                if (event.xbutton.button == Button1 &&
+                    event.xbutton.y < TAB_BAR_HEIGHT) {
                     int x = event.xbutton.x;
                     int tab_index = (x - 6) / TAB_WIDTH;
                     int local_x = (x - 6) % TAB_WIDTH;
 
+                    app->selection_active = 0;
                     if (x >= 6 && tab_index >= 0 &&
                         tab_index < app->tab_count) {
                         if (local_x >= 185 && local_x <= 200)
@@ -447,13 +581,115 @@ void gui_run(App *app)
                                x < app->tab_count * TAB_WIDTH + PLUS_WIDTH + 7) {
                         create_tab(app);
                     }
+                } else if (event.xbutton.button == Button1) {
+                    Tab *active = &app->tabs[app->active_tab];
+                    int width = app->width - LEFT_MARGIN * 2;
+                    if (width < 1) width = 1;
+                    DisplayLine *lines = NULL;
+                    size_t count = 0, capacity = 0;
+                    if (wrap_output(app, &lines, &count, &capacity, width) == 0) {
+                        char prompt[PATH_MAX + 64];
+                        const char *visible_input = active->input;
+                        if (app->history_search_mode) {
+                            snprintf(prompt, sizeof(prompt), "Enter search term: ");
+                            visible_input = app->history_search;
+                        } else if (active->continuing) {
+                            snprintf(prompt, sizeof(prompt), "> ");
+                        } else {
+                            snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", active->cwd);
+                        }
+                        char input_line[PATH_MAX + INPUT_CAP + 128];
+                        snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
+                        size_t output_count = count, cap = capacity;
+                        if (wrap_text(app, &lines, &count, &cap, input_line,
+                                      strlen(input_line), width) == 0) {
+                            int first_y = CONTENT_TOP + font_height(app);
+                            int rows = (app->height - first_y - 8) / line_height(app);
+                            if (rows < 1) rows = 1;
+                            size_t input_rows = count - output_count;
+                            if (input_rows > (size_t)rows) input_rows = (size_t)rows;
+                            size_t output_rows = (size_t)rows - input_rows;
+                            size_t scroll = active->scroll_offset < 0 ? 0 : (size_t)active->scroll_offset;
+                            if (scroll > output_count) scroll = output_count;
+                            size_t output_end = output_count - scroll;
+                            size_t output_start = output_end > output_rows ?
+                                output_end - output_rows : 0;
+                            int line, col;
+                            if (selection_hit_test(app, lines, output_count,
+                                                   output_start, output_end,
+                                                   event.xbutton.x, event.xbutton.y,
+                                                   &line, &col)) {
+                                app->selecting = 1;
+                                app->selection_active = 1;
+                                app->selection_anchor_line = line;
+                                app->selection_anchor_col = col;
+                                app->selection_end_line = line;
+                                app->selection_end_col = col;
+                            } else {
+                                app->selecting = 0;
+                                app->selection_active = 0;
+                            }
+                        }
+                        free_lines(lines, count);
+                    }
                 } else if (event.xbutton.button == Button4) {
                     app->tabs[app->active_tab].scroll_offset += 3;
+                    app->selection_active = 0;
                 } else if (event.xbutton.button == Button5) {
                     app->tabs[app->active_tab].scroll_offset -= 3;
                     if (app->tabs[app->active_tab].scroll_offset < 0)
                         app->tabs[app->active_tab].scroll_offset = 0;
+                    app->selection_active = 0;
                 }
+                gui_redraw(app);
+            } else if (event.type == MotionNotify && app->selecting) {
+                Tab *active = &app->tabs[app->active_tab];
+                int width = app->width - LEFT_MARGIN * 2;
+                if (width < 1) width = 1;
+                DisplayLine *lines = NULL;
+                size_t count = 0, capacity = 0;
+                if (wrap_output(app, &lines, &count, &capacity, width) == 0) {
+                    char prompt[PATH_MAX + 64];
+                    const char *visible_input = active->input;
+                    if (app->history_search_mode) {
+                        snprintf(prompt, sizeof(prompt), "Enter search term: ");
+                        visible_input = app->history_search;
+                    } else if (active->continuing) {
+                        snprintf(prompt, sizeof(prompt), "> ");
+                    } else {
+                        snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", active->cwd);
+                    }
+                    char input_line[PATH_MAX + INPUT_CAP + 128];
+                    snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
+                    size_t output_count = count, cap = capacity;
+                    if (wrap_text(app, &lines, &count, &cap, input_line,
+                                  strlen(input_line), width) == 0) {
+                        int first_y = CONTENT_TOP + font_height(app);
+                        int rows = (app->height - first_y - 8) / line_height(app);
+                        if (rows < 1) rows = 1;
+                        size_t input_rows = count - output_count;
+                        if (input_rows > (size_t)rows) input_rows = (size_t)rows;
+                        size_t output_rows = (size_t)rows - input_rows;
+                        size_t scroll = active->scroll_offset < 0 ? 0 : (size_t)active->scroll_offset;
+                        if (scroll > output_count) scroll = output_count;
+                        size_t output_end = output_count - scroll;
+                        size_t output_start = output_end > output_rows ?
+                            output_end - output_rows : 0;
+                        int line, col;
+                        if (selection_hit_test(app, lines, output_count,
+                                               output_start, output_end,
+                                               event.xmotion.x, event.xmotion.y,
+                                               &line, &col)) {
+                            app->selection_end_line = line;
+                            app->selection_end_col = col;
+                        }
+                    }
+                    free_lines(lines, count);
+                }
+                gui_redraw(app);
+            } else if (event.type == ButtonRelease &&
+                       event.xbutton.button == Button1) {
+                app->selecting = 0;
                 gui_redraw(app);
             } else if (event.type == KeyPress) {
                 char text[32] = "";

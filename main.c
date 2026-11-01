@@ -52,7 +52,7 @@ int main(void)
     app.targets_atom = XInternAtom(app.display, "TARGETS", False);
     app.paste_property = XInternAtom(app.display, "TERMINATOR_CLIPBOARD", False);
     XSelectInput(app.display, app.window,
-                 ExposureMask | KeyPressMask | ButtonPressMask | StructureNotifyMask);
+                 ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask);
 
     // Load scalable font
 app.font = XftFontOpenName(app.display,screen,"DejaVu Sans Mono:size=16");
