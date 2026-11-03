@@ -1,12 +1,13 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -g -D_GNU_SOURCE
 CFLAGS += $(shell pkg-config --cflags xft)
-LDLIBS = -lX11 $(shell pkg-config --libs xft)
+LDLIBS = -lX11 -lpthread -lrt $(shell pkg-config --libs xft)
 
 SOURCES = main.c gui.c shell.c parser.c builtins.c hotkeys.c multiwatch.c
 OBJECTS = $(SOURCES:.c=.o)
 
 .PHONY: all clean
+
 all: terminator
 
 terminator: $(OBJECTS)
@@ -16,4 +17,4 @@ terminator: $(OBJECTS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJECTS) terminator
+	rm -f $(OBJECTS) *.o terminator

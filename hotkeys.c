@@ -8,8 +8,18 @@
 #include <limits.h>
 #include <X11/Xatom.h>
 #include <ctype.h>
+#include <signal.h>
 
-
+static void tab_send_command(Tab *tab, const char *command)
+{
+    if (tab->pipe_to_tab[1] >= 0) {
+        int len = (int)strlen(command);
+        write(tab->pipe_to_tab[1], &len, sizeof(len));
+        write(tab->pipe_to_tab[1], command, len);
+    } else {
+        shell_execute(tab->app_ref, tab, command);
+    }
+}
 
 static void clear_completions(App *app)
 {
@@ -21,6 +31,7 @@ static void clear_completions(App *app)
     app->completion_active = 0;
 }
 
+//complete filename after tab
 static void replace_input_range(Tab *tab, size_t start, size_t end,
                                 const char *replacement)
 {
@@ -35,7 +46,6 @@ static void replace_input_range(Tab *tab, size_t start, size_t end,
     memcpy(tab->input + start, replacement, replacement_length);
     tab->cursor = start + replacement_length;
 }
-
 
 
 static void filename_completion(App *app, Tab *tab)
@@ -90,7 +100,7 @@ static void filename_completion(App *app, Tab *tab)
         memcpy(search_directory + cwd_len + 1,
                directory_part, dir_len + 1);
     }
-    /* opendir() accepts a trailing slash and ".". */
+    // opendir() accepts a trailing slash and "." 
     DIR *directory = opendir(search_directory);
     if (directory == NULL)
         return;
@@ -137,6 +147,7 @@ static void filename_completion(App *app, Tab *tab)
     app->completion_selected = 0;
 }
 
+//ctrl+r
 static int longest_common_substring_length(const char *a, const char *b)
 {
     size_t n = strlen(a), m = strlen(b);
@@ -171,22 +182,26 @@ static void execute_history_search(App *app, Tab *tab)
 {
     const char *term = app->history_search;
     int exact = -1;
-    for (int i = app->history_count - 1; i >= 0; i--) {
-        if (strcmp(app->history[i], term) == 0) {
+    int count = app->shared_history ? app->shared_history->count : app->history_count;
+    for (int i = count - 1; i >= 0; i--) {
+        const char *entry = app->shared_history ? app->shared_history->lines[i] : app->history[i];
+        if (strcmp(entry, term) == 0) {
             exact = i;
             break;
         }
     }
 
     if (exact >= 0) {
-        tab_append(tab, app->history[exact]);
+        const char *entry = app->shared_history ? app->shared_history->lines[exact] : app->history[exact];
+        tab_append(tab, entry);
         tab_append(tab, "\n");
         return;
     }
 
     int best = 0;
-    for (int i = 0; i < app->history_count; i++) {
-        int length = longest_common_substring_length(app->history[i], term);
+    for (int i = 0; i < count; i++) {
+        const char *entry = app->shared_history ? app->shared_history->lines[i] : app->history[i];
+        int length = longest_common_substring_length(entry, term);
         if (length > best) best = length;
     }
 
@@ -195,9 +210,10 @@ static void execute_history_search(App *app, Tab *tab)
         return;
     }
 
-    for (int i = 0; i < app->history_count; i++) {
-        if (longest_common_substring_length(app->history[i], term) == best) {
-            tab_append(tab, app->history[i]);
+    for (int i = 0; i < count; i++) {
+        const char *entry = app->shared_history ? app->shared_history->lines[i] : app->history[i];
+        if (longest_common_substring_length(entry, term) == best) {
+            tab_append(tab, entry);
             tab_append(tab, "\n");
         }
     }
@@ -332,6 +348,30 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         begin_clipboard_paste(app);
         return 1;
     }
+    if (control && !shift && (key == XK_c || key == XK_C)) {
+        pid_t pgid = (tab->shared && tab->shared->foreground_pgid > 0) ? tab->shared->foreground_pgid : 0;
+        if (pgid > 0) {
+            tab_append(tab, "^C\n");
+            kill(-pgid, SIGINT);
+            kill(pgid, SIGINT);
+        } else {
+            tab_append(tab, "^C\n");
+            tab->input[0] = '\0';
+            tab->cursor = 0;
+            tab->continuing = 0;
+            tab->multiline[0] = '\0';
+        }
+        return 1;
+    }
+    if (control && (key == XK_z || key == XK_Z)) {
+        pid_t pgid = (tab->shared && tab->shared->foreground_pgid > 0) ? tab->shared->foreground_pgid : 0;
+        if (pgid > 0) {
+            tab_append(tab, "^Z\n");
+            kill(-pgid, SIGTSTP);
+            kill(pgid, SIGTSTP);
+        }
+        return 1;
+    }
 
     if (app->completion_active) {
         if (key == XK_Tab) {
@@ -346,7 +386,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
                                     app->completion_end,
                                     app->completion_matches[selected]);
             clear_completions(app);
-            return 1; /* First Enter accepts; a second Enter executes. */
+            return 1; 
         }
         if (key == XK_Escape) {
             clear_completions(app);
@@ -374,6 +414,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
             app->history_search[0] = '\0';
             return 1;
         }
+        //append text in history_search
         if (!control && !alt && text != NULL && text_len > 0 &&
             (unsigned char)text[0] >= 32) {
             size_t n = strlen(app->history_search);
@@ -403,15 +444,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         return 1;
     }
     if (control && key == XK_t) {
-        if (app->tab_count < MAX_TABS) {
-            int index = app->tab_count++;
-            memset(&app->tabs[index], 0, sizeof(app->tabs[index]));
-            app->tabs[index].alive = 1;
-            app->tabs[index].history_index = -1;
-            if (getcwd(app->tabs[index].cwd, sizeof(app->tabs[index].cwd)) == NULL)
-                snprintf(app->tabs[index].cwd, sizeof(app->tabs[index].cwd), "/");
-            app->active_tab = index;
-        }
+        create_tab(app);
         return 1;
     }
     if (control && key == XK_l) {
@@ -435,18 +468,15 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         tab->input[tab->cursor] = '\0';
         return 1;
     }
-    /* Ctrl+W deletes the previous word, not the current tab. */
+
     if (control && key == XK_w) {
         size_t cursor = tab->cursor;
-
-        /* First remove whitespace immediately before the cursor. */
         while (cursor > 0 &&
                (tab->input[cursor - 1] == ' ' ||
                 tab->input[cursor - 1] == '\t')) {
             cursor--;
         }
 
-        /* Then remove the previous word. */
         while (cursor > 0 &&
                tab->input[cursor - 1] != ' ' &&
                tab->input[cursor - 1] != '\t') {
@@ -459,59 +489,73 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         tab->cursor = cursor;
         return 1;
     }
+
     if (key == XK_Left && tab->cursor > 0) {
         tab->cursor--;
         return 1;
     }
+
     if (key == XK_Right && tab->cursor < strlen(tab->input)) {
         tab->cursor++;
         return 1;
     }
+
     if (key == XK_Home || (control && key == XK_a)) {
         tab->cursor = 0;
         return 1;
     }
+
     if (key == XK_End || (control && key == XK_e)) {
         tab->cursor = strlen(tab->input);
         return 1;
     }
+
     if (key == XK_Up) {
-        if (app->history_count > 0) {
+        int count = app->shared_history ? app->shared_history->count : app->history_count;
+        if (count > 0) {
             if (tab->history_index < 0)
-                tab->history_index = app->history_count - 1;
+                tab->history_index = count - 1;
             else if (tab->history_index > 0)
                 tab->history_index--;
-            replace_input(tab, app->history[tab->history_index]);
+            const char *entry = app->shared_history ? app->shared_history->lines[tab->history_index] : app->history[tab->history_index];
+            replace_input(tab, entry);
         }
         return 1;
     }
+
     if (key == XK_Down) {
-        if (tab->history_index >= 0 && tab->history_index < app->history_count - 1) {
+        int count = app->shared_history ? app->shared_history->count : app->history_count;
+        if (tab->history_index >= 0 && tab->history_index < count - 1) {
             tab->history_index++;
-            replace_input(tab, app->history[tab->history_index]);
+            const char *entry = app->shared_history ? app->shared_history->lines[tab->history_index] : app->history[tab->history_index];
+            replace_input(tab, entry);
         } else {
             tab->history_index = -1;
             replace_input(tab, "");
         }
         return 1;
     }
+
     if (key == XK_BackSpace && tab->cursor > 0) {
         memmove(tab->input + tab->cursor - 1, tab->input + tab->cursor,
                 strlen(tab->input + tab->cursor) + 1);
         tab->cursor--;
         return 1;
     }
+
     if (key == XK_Delete && tab->cursor < strlen(tab->input)) {
         memmove(tab->input + tab->cursor, tab->input + tab->cursor + 1,
                 strlen(tab->input + tab->cursor + 1) + 1);
         return 1;
     }
+
     if (control && key == XK_d && tab->input[0] == '\0') {
         close_active_tab(app);
         return 1;
     }
+    
     if (key == XK_Return || key == XK_KP_Enter) {
-        if (app->foreground_pgid > 0) {
+        if (tab->shared && tab->shared->busy) {
             tab_append(tab, "\nterminator: wait for the foreground command to finish first\n");
             return 1;
         }
@@ -544,7 +588,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
             tab->continuing = 0;
             tab->cursor = 0;
             tab->history_index = -1;
-            shell_execute(app, tab, command);
+            tab_send_command(tab, command);
             return 1;
         }
 
@@ -553,7 +597,8 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
             return 1;
         }
 
-        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", tab->cwd);
+        const char *cwd = (tab->shared && tab->shared->cwd[0]) ? tab->shared->cwd : tab->cwd;
+        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", cwd);
         append_visible_command(tab, prompt, tab->input);
 
         if (command_is_incomplete(tab->input)) {
@@ -572,7 +617,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
         tab->continuing = 0;
         tab->cursor = 0;
         tab->history_index = -1;
-        shell_execute(app, tab, command);
+        tab_send_command(tab, command);
         return 1;
     }
     if (!control && !alt && text != NULL && text[0] >= ' ' && text[0] != 127) {

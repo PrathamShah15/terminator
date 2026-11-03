@@ -1,0 +1,8 @@
+   271 builtins.c
+   926 gui.c
+   633 hotkeys.c
+   222 main.c
+   327 multiwatch.c
+  1166 parser.c
+    40 shell.c
+  3585 total

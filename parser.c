@@ -484,6 +484,15 @@ void jobs_poll(App *app)
                     job->stopped = 1;
                 } else if (WIFCONTINUED(status)) {
                     job->stopped = 0;
+                } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    append_job_output(app, job);
+                    if (job->output_fd >= 0)
+                        close(job->output_fd);
+                    job->output_fd = -1;
+                    job->active = 0;
+                    if (job->tab_index >= 0 && job->tab_index < app->tab_count)
+                        tab_append(&app->tabs[job->tab_index], "[job] completed\n");
+                    break;
                 }
             }
         } while (result > 0);
@@ -527,14 +536,23 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
     int final_status = 0;
     *was_stopped = 0;
     app->foreground_pgid = pgid;
+    if (tab->shared)
+        tab->shared->foreground_pgid = pgid;
     app->foreground_tab_index = (int)(tab - app->tabs);
 
+    int is_worker = 0;
+    if (app->use_process_mode) {
+        if (tab->pipe_from_tab[1] >= 0) is_worker = 1;
+    } else {
+        if (!pthread_equal(pthread_self(), app->gui_thread_id)) is_worker = 1;
+    }
+
     /*
-     * Capture mode is used only in a forked command-substitution child.
-     * It must not access X11 or append output to the GUI tab.
+     * Capture mode and worker mode must not access X11.
+     * GUI thread is already running the X11 event loop in gui_run().
      */
-    if (capture_mode) {
-        while (!group_done) {
+    if (capture_mode || is_worker || app->display == NULL) {
+        while (!group_done && !*was_stopped) {
             struct pollfd pfd;
             pfd.fd = output_open ? output_fd : -1;
             pfd.events = POLLIN | POLLHUP;
@@ -545,6 +563,56 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
                 char buffer[2048];
                 ssize_t bytes;
                 while ((bytes = read(output_fd, buffer, sizeof(buffer))) > 0) {
+                    if (capture_mode) {
+                        size_t offset = 0;
+                        while (offset < (size_t)bytes) {
+                            ssize_t written = write(STDOUT_FILENO,
+                                                    buffer + offset,
+                                                    (size_t)bytes - offset);
+                            if (written < 0 && errno == EINTR)
+                                continue;
+                            if (written <= 0)
+                                break;
+                            offset += (size_t)written;
+                        }
+                    } else {
+                        char chunk[2049];
+                        memcpy(chunk, buffer, (size_t)bytes);
+                        chunk[bytes] = '\0';
+                        tab_append(tab, chunk);
+                    }
+                }
+                if (bytes == 0)
+                    output_open = 0;
+            }
+
+            int status;
+            pid_t result;
+            do {
+                result = waitpid(-pgid, &status, WNOHANG | WUNTRACED);
+                if (result > 0) {
+                    if (WIFSTOPPED(status)) {
+                        // (void)kill(-pgid, SIGTERM);
+                        *was_stopped = 1;
+                        final_status = 128 + WSTOPSIG(status);
+                        break;
+                    }
+                    if (WIFEXITED(status))
+                        final_status = WEXITSTATUS(status);
+                    else if (WIFSIGNALED(status))
+                        final_status = 128 + WTERMSIG(status);
+                }
+            } while (result < 0 && errno == EINTR);
+
+            if (result < 0 && errno == ECHILD)
+                group_done = 1;
+        }
+
+        if (output_open) {
+            char buffer[2048];
+            ssize_t bytes;
+            while ((bytes = read(output_fd, buffer, sizeof(buffer))) > 0) {
+                if (capture_mode) {
                     size_t offset = 0;
                     while (offset < (size_t)bytes) {
                         ssize_t written = write(STDOUT_FILENO,
@@ -556,49 +624,40 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
                             break;
                         offset += (size_t)written;
                     }
+                } else {
+                    char chunk[2049];
+                    memcpy(chunk, buffer, (size_t)bytes);
+                    chunk[bytes] = '\0';
+                    tab_append(tab, chunk);
                 }
-                if (bytes == 0)
-                    output_open = 0;
             }
-
-            int status;
-            pid_t result;
-            do {
-                result = waitpid(-pgid, &status, WNOHANG | WUNTRACED);
-            } while (result < 0 && errno == EINTR);
-
-            if (result > 0 && WIFSTOPPED(status)) {
-                (void)kill(-pgid, SIGTERM);
-                *was_stopped = 1;
-                final_status = 128 + WSTOPSIG(status);
-                break;
-            }
-
-            if (result < 0 && errno == ECHILD)
-                group_done = 1;
         }
 
-        if (output_open) {
-            char buffer[2048];
-            ssize_t bytes;
-            while ((bytes = read(output_fd, buffer, sizeof(buffer))) > 0) {
-                size_t offset = 0;
-                while (offset < (size_t)bytes) {
-                    ssize_t written = write(STDOUT_FILENO,
-                                            buffer + offset,
-                                            (size_t)bytes - offset);
-                    if (written < 0 && errno == EINTR)
-                        continue;
-                    if (written <= 0)
-                        break;
-                    offset += (size_t)written;
-                }
+        app->foreground_pgid = 0;
+        if (tab->shared)
+            tab->shared->foreground_pgid = 0;
+        app->foreground_tab_index = -1;
+
+        if (*was_stopped) {
+            int slot = find_free_job(app);
+            if (slot >= 0) {
+                Job *job = &app->jobs[slot];
+                job->pgid = pgid;
+                job->output_fd = output_fd;
+                job->active = 1;
+                job->stopped = 1;
+                job->tab_index = (tab->tab_id >= 0 && tab->tab_id < app->tab_count) ? tab->tab_id : app->active_tab;
+                snprintf(job->command, sizeof(job->command), "%s", command);
+                char message[INPUT_CAP + 64];
+                snprintf(message, sizeof(message), "[%d]+ Stopped     %s\n", slot + 1, command);
+                tab_append(tab, message);
+                return final_status;
             }
+            (void)kill(-pgid, SIGCONT);
+            (void)kill(-pgid, SIGTERM);
         }
 
         close(output_fd);
-        app->foreground_pgid = 0;
-        app->foreground_tab_index = -1;
         return final_status;
     }
 
@@ -641,10 +700,12 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
                     (key == XK_c || key == XK_C)) {
                     tab_append(tab, "^C\n");
                     (void)kill(-pgid, SIGINT);
+                    (void)kill(pgid, SIGINT);
                 } else if (is_foreground_tab && (event.xkey.state & ControlMask) &&
                            (key == XK_z || key == XK_Z)) {
                     tab_append(tab, "^Z\n");
                     (void)kill(-pgid, SIGTSTP);
+                    (void)kill(pgid, SIGTSTP);
                 } else {
                     /* Keep other tabs interactive while this tab has a foreground job. */
                     (void)hotkey_handle(app, &event.xkey, key, text, length);
@@ -663,15 +724,8 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
                             app->active_tab = tab_index;
                         }
                     } else if (x >= app->tab_count * 220 + 7 &&
-                               x < app->tab_count * 220 + 55 &&
-                               app->tab_count < MAX_TABS) {
-                        int index = app->tab_count++;
-                        memset(&app->tabs[index], 0, sizeof(app->tabs[index]));
-                        app->tabs[index].alive = 1;
-                        app->tabs[index].history_index = -1;
-                        if (getcwd(app->tabs[index].cwd, sizeof(app->tabs[index].cwd)) == NULL)
-                            snprintf(app->tabs[index].cwd, sizeof(app->tabs[index].cwd), "/");
-                        app->active_tab = index;
+                               x < app->tab_count * 220 + 55) {
+                        create_tab(app);
                     }
                 } else if (event.xbutton.button == Button4) {
                     app->tabs[app->active_tab].scroll_offset += 3;
@@ -714,6 +768,8 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
     }
 
     app->foreground_pgid = 0;
+    if (tab->shared)
+        tab->shared->foreground_pgid = 0;
     app->foreground_tab_index = -1;
     if (*was_stopped) {
         int slot = find_free_job(app);
@@ -830,6 +886,7 @@ int job_control_builtin(App *app, Tab *tab, const char *line)
     (void)sscanf(line, "%15s %31s", name, target);
 
     if (strcmp(name, "jobs") == 0) {
+        jobs_poll(app);
         for (int i = 0; i < MAX_JOBS; i++) {
             Job *job = &app->jobs[i];
             if (job->active) {
@@ -850,6 +907,15 @@ int job_control_builtin(App *app, Tab *tab, const char *line)
         index = atoi(target + 1) - 1;
     else if (target[0] != '\0')
         index = atoi(target) - 1;
+    else {
+        for (int i = MAX_JOBS - 1; i >= 0; i--) {
+            if (app->jobs[i].active) {
+                index = i;
+                break;
+            }
+        }
+    }
+
     if (index < 0 || index >= MAX_JOBS || !app->jobs[index].active) {
         tab_append(tab, "terminator: no such job\n");
         return 1;
@@ -868,6 +934,8 @@ int job_control_builtin(App *app, Tab *tab, const char *line)
         return 1;
     }
 
+    tab_append(tab, job->command);
+    tab_append(tab, "\n");
     (void)kill(-job->pgid, SIGCONT);
     job->stopped = 0;
     int fd = job->output_fd;
@@ -952,6 +1020,13 @@ static int parser_execute_pipeline_internal(App *app, Tab *tab,
     for (int i = 0; i < count; i++) {
         pid_t pid = fork();
         if (pid == 0) {
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
+            signal(SIGTTIN, SIG_DFL);
+            signal(SIGTTOU, SIG_DFL);
+            signal(SIGCHLD, SIG_DFL);
+
             if (pgid == 0)
                 (void)setpgid(0, 0);
             else

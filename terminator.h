@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <X11/Xft/Xft.h>
+#include <pthread.h>
+#include <semaphore.h>
 
 #define MAX_TABS 8
 #define INPUT_CAP 4096
@@ -18,6 +20,21 @@
 #define MAX_WATCH_COMMANDS 16
 #define WATCH_OUTPUT_CAP 8192
 #define MAX_COMPLETIONS 128
+#define SHM_NAME "/terminator_history_shm"
+#define SEM_NAME "/terminator_history_sem"
+
+typedef struct App App;
+
+typedef struct {
+    char cwd[PATH_MAX];
+    pid_t foreground_pgid;
+    int busy;
+} TabSharedState;
+
+typedef struct {
+    int count;
+    char lines[HISTORY_CAP][INPUT_CAP];
+} SharedHistory;
 
 typedef struct {
     char cwd[PATH_MAX];
@@ -30,6 +47,15 @@ typedef struct {
     int history_index;
     int scroll_offset;
     int alive;
+    
+    /* Execution Mode fields */
+    int tab_id;
+    pthread_t thread_id;        /* Used in Thread Mode */
+    pid_t process_id;           /* Used in Process Mode */
+    int pipe_to_tab[2];         /* Parent -> Child process pipe */
+    int pipe_from_tab[2];       /* Child process -> Parent pipe */
+    TabSharedState *shared;     /* Shared tab state (cwd, fg pgid, busy) */
+    App *app_ref;
 } Tab;
 
 typedef struct {
@@ -61,7 +87,7 @@ typedef struct {
     WatchCommand commands[MAX_WATCH_COMMANDS];
 } MultiWatch;
 
-typedef struct {
+struct App {
     Display *display;
     Window window;
     GC gc;
@@ -99,6 +125,15 @@ typedef struct {
     int next_job_id;
     MultiWatch multiwatch;
 
+    /* Execution Mode Flags and Synchronization */
+    int use_process_mode;          /* 0 = Thread Mode (default), 1 = Process Mode */
+    pthread_mutex_t history_mutex; /* Mutex for Thread Mode */
+    sem_t *history_sem;            /* POSIX Semaphore for Process Mode */
+    int shm_fd;                    /* Shared Memory File Descriptor */
+    SharedHistory *shared_history; /* Shared command history buffer */
+    TabSharedState *tab_shared_pool; /* Shared tab state pool */
+    pthread_t gui_thread_id;       /* ID of the GUI main thread */
+
     /* Ctrl+R searchable-history state */
     int history_search_mode;
     char history_search[INPUT_CAP];
@@ -125,7 +160,7 @@ typedef struct {
     int selection_anchor_col;
     int selection_end_line;
     int selection_end_col;
-} App;
+};
 
 void gui_run(App *app);
 void gui_redraw(App *app);
@@ -137,7 +172,9 @@ void jobs_poll(App *app);
 int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int text_len);
 void hotkeys_cleanup(App *app);
 void tab_append(Tab *tab, const char *text);
+void tab_append_raw(Tab *tab, const char *text);
 void tab_clear(Tab *tab);
+void tab_worker_loop(App *app, Tab *tab);
 void history_add(App *app, const char *line);
 void history_load(App *app);
 void history_save(App *app);
@@ -145,6 +182,7 @@ void history_free(App *app);
 int multiwatch_start(App *app, Tab *tab, const char *arguments);
 void multiwatch_poll(App *app);
 void multiwatch_stop(App *app);
+void create_tab(App *app);
 void close_tab(App *app, int index);
 void gui_copy_selection(App *app);
 

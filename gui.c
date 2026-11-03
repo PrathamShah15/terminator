@@ -1,3 +1,6 @@
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <pthread.h>
 #include "terminator.h"
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
@@ -6,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <poll.h>
+#include <signal.h>
 
 #define LEFT_MARGIN 14
 #define TAB_BAR_HEIGHT 42
@@ -45,7 +49,7 @@ static void draw_text(App *app,int x,int y,const char *text,int length,XftColor 
     XftDrawStringUtf8(app->xft_draw,color,app->font,x,y,(const FcChar8 *)text,length);
 }
 
-
+//protect from memory leak
 static void free_lines(DisplayLine *lines, size_t count)
 {
     for (size_t i = 0; i < count; i++) free(lines[i].text);
@@ -155,26 +159,191 @@ static void draw_tab_bar(App *app)
     }
 }
 
-static void create_tab(App *app)
+void tab_worker_loop(App *app, Tab *tab)
+{
+    if (tab->cwd[0] != '\0')
+        chdir(tab->cwd);
+
+    while (1) {
+        jobs_poll(app);
+
+        struct pollfd pfd;
+        pfd.fd = tab->pipe_to_tab[0];
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 50);
+        if (pr <= 0) continue;
+
+        int len = 0;
+        ssize_t n = read(tab->pipe_to_tab[0], &len, sizeof(len));
+        if (n <= 0) break;
+        if (len <= 0 || len >= INPUT_CAP) continue;
+
+        char command[INPUT_CAP];
+        int total = 0;
+        while (total < len) {
+            ssize_t r = read(tab->pipe_to_tab[0], command + total, len - total);
+            if (r <= 0) break;
+            total += (int)r;
+        }
+        if (total < len) break;
+        command[len] = '\0';
+
+        if (tab->shared) {
+            tab->shared->busy = 1;
+        }
+
+        shell_execute(app, tab, command);
+
+        if (tab->shared) {
+            /* Preserve cwd set by builtin cd; do not overwrite */
+            tab->shared->foreground_pgid = 0;
+            tab->shared->busy = 0;
+        }
+    }
+}
+
+static void *tab_thread_worker(void *arg)
+{
+    Tab *tab = (Tab *)arg;
+    App *app = tab->app_ref;
+    tab_worker_loop(app, tab);
+    return NULL;
+}
+
+void create_tab(App *app)
 {
     if (app->tab_count >= MAX_TABS) return;
+
     int index = app->tab_count++;
-    memset(&app->tabs[index], 0, sizeof(app->tabs[index]));
-    app->tabs[index].alive = 1; app->tabs[index].history_index = -1;
-    if (getcwd(app->tabs[index].cwd, sizeof(app->tabs[index].cwd)) == NULL)
-        snprintf(app->tabs[index].cwd, sizeof(app->tabs[index].cwd), "/");
+    Tab *tab = &app->tabs[index];
+    memset(tab, 0, sizeof(*tab));
+
+    tab->alive = 1;
+    tab->tab_id = index;
+    tab->history_index = -1;
+    tab->app_ref = app;
+    if (app->tab_shared_pool) {
+        tab->shared = &app->tab_shared_pool[index];
+        memset(tab->shared, 0, sizeof(TabSharedState));
+    }
+
+    if (getcwd(tab->cwd, sizeof(tab->cwd)) == NULL)
+        snprintf(tab->cwd, sizeof(tab->cwd), "/");
+    if (tab->shared)
+        snprintf(tab->shared->cwd, sizeof(tab->shared->cwd), "%s", tab->cwd);
+
+    if (pipe(tab->pipe_to_tab) < 0 || pipe(tab->pipe_from_tab) < 0) {
+        perror("pipe failed");
+        app->tab_count--;
+        return;
+    }
+
+    if (app->use_process_mode) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork failed");
+            close(tab->pipe_to_tab[0]); close(tab->pipe_to_tab[1]);
+            close(tab->pipe_from_tab[0]); close(tab->pipe_from_tab[1]);
+            app->tab_count--;
+            return;
+        }
+
+        if (pid == 0) {
+            close(tab->pipe_to_tab[1]);
+            close(tab->pipe_from_tab[0]);
+            tab->pipe_to_tab[1] = -1;
+            tab->pipe_from_tab[0] = -1;
+
+            if (app->display) {
+                close(ConnectionNumber(app->display));
+                app->display = NULL;
+            }
+
+            signal(SIGINT, SIG_IGN);
+            signal(SIGTSTP, SIG_IGN);
+
+            tab_worker_loop(app, tab);
+
+            close(tab->pipe_to_tab[0]);
+            close(tab->pipe_from_tab[1]);
+            _exit(0);
+        } else {
+            close(tab->pipe_to_tab[0]);
+            close(tab->pipe_from_tab[1]);
+            tab->pipe_to_tab[0] = -1;
+            tab->pipe_from_tab[1] = -1;
+            tab->process_id = pid;
+
+            int flags = fcntl(tab->pipe_from_tab[0], F_GETFL, 0);
+            if (flags >= 0)
+                fcntl(tab->pipe_from_tab[0], F_SETFL, flags | O_NONBLOCK);
+
+            tab_append_raw(tab, "Tab created in Process Mode (useProcess=True).\n");
+        }
+    } else {
+        int flags = fcntl(tab->pipe_from_tab[0], F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(tab->pipe_from_tab[0], F_SETFL, flags | O_NONBLOCK);
+
+        int err = pthread_create(&tab->thread_id, NULL, tab_thread_worker, tab);
+        if (err != 0) {
+            fprintf(stderr, "Failed to create tab thread: %d\n", err);
+            close(tab->pipe_to_tab[0]); close(tab->pipe_to_tab[1]);
+            close(tab->pipe_from_tab[0]); close(tab->pipe_from_tab[1]);
+            app->tab_count--;
+            return;
+        }
+        pthread_detach(tab->thread_id);
+        tab_append_raw(tab, "Tab created in Thread Mode (Default, pthread_t active).\n");
+    }
+
     app->active_tab = index;
 }
 
 void close_tab(App *app, int index)
 {
     if (index < 0 || index >= app->tab_count) return;
-    if (app->tab_count == 1) { app->running = 0; return; }
-    for (int i = index; i < app->tab_count - 1; i++) app->tabs[i] = app->tabs[i + 1];
+
+    if (app->tab_count == 1) {
+        app->running = 0;
+        return;
+    }
+
+    Tab *tab = &app->tabs[index];
+
+    if (app->use_process_mode) {
+        if (tab->process_id > 0) {
+            kill(tab->process_id, SIGTERM);
+            waitpid(tab->process_id, NULL, WNOHANG);
+        }
+    } else {
+        tab->alive = 0;
+    }
+    if (tab->pipe_to_tab[1] >= 0) {
+        close(tab->pipe_to_tab[1]);
+        tab->pipe_to_tab[1] = -1;
+    }
+    if (tab->pipe_from_tab[0] >= 0) {
+        close(tab->pipe_from_tab[0]);
+        tab->pipe_from_tab[0] = -1;
+    }
+
+    for (int i = index; i < app->tab_count - 1; i++) {
+        app->tabs[i] = app->tabs[i + 1];
+        if (app->tab_shared_pool) {
+            app->tab_shared_pool[i] = app->tab_shared_pool[i + 1];
+            app->tabs[i].shared = &app->tab_shared_pool[i];
+        }
+    }
+
     app->tab_count--;
-    if (app->active_tab > index) app->active_tab--;
-    else if (app->active_tab == index && app->active_tab >= app->tab_count) app->active_tab = app->tab_count - 1;
-    if (app->active_tab < 0) app->active_tab = 0;
+    if (app->active_tab > index)
+        app->active_tab--;
+    else if (app->active_tab == index && app->active_tab >= app->tab_count)
+        app->active_tab = app->tab_count - 1;
+
+    if (app->active_tab < 0)
+        app->active_tab = 0;
 }
 
 
@@ -211,6 +380,7 @@ static int selection_hit_test(App *app, DisplayLine *lines, size_t output_count,
     return 1;
 }
 
+//allows to select in both directions
 static void selection_order(const App *app, int *sl, int *sc, int *el, int *ec)
 {
     *sl = app->selection_anchor_line;
@@ -223,6 +393,7 @@ static void selection_order(const App *app, int *sl, int *sc, int *el, int *ec)
     }
 }
 
+//extract selected text and place it in clipboard
 void gui_copy_selection(App *app)
 {
     if (!app || !app->selection_active || app->tab_count <= 0) return;
@@ -243,7 +414,7 @@ void gui_copy_selection(App *app)
         free_lines(lines, count);
         return;
     }
-
+    //bytes to allocate
     size_t total = 1;
     for (int i = sl; i <= el; i++) {
         int a = i == sl ? sc : 0;
@@ -322,7 +493,8 @@ void gui_redraw(App *app)
     } else if (tab->continuing) {
         snprintf(prompt, sizeof(prompt), "> ");
     } else {
-        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", tab->cwd);
+        const char *cwd = (tab->shared && tab->shared->cwd[0]) ? tab->shared->cwd : tab->cwd;
+        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", cwd);
     }
     char input_line[PATH_MAX + INPUT_CAP + 128];
     snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
@@ -365,11 +537,11 @@ void gui_redraw(App *app)
                                (unsigned)(sw > 1 ? sw : 2),
                                (unsigned)line_height(app));
                 draw_text(app, LEFT_MARGIN, y, lines[i].text, a,
-                          &app->xft_foreground);
+                          &app->xft_foreground);//before selection
                 draw_text(app, sx, y, lines[i].text + a, b - a,
-                          &app->xft_foreground);
+                          &app->xft_foreground); //in highlighted area
                 draw_text(app, sx + sw, y, lines[i].text + b,
-                          lines[i].length - b, &app->xft_foreground);
+                          lines[i].length - b, &app->xft_foreground); //after selection
             } else {
                 draw_text(app, LEFT_MARGIN, y, lines[i].text,
                           lines[i].length, &app->xft_foreground);
@@ -384,7 +556,8 @@ void gui_redraw(App *app)
     // if (tab->scroll_offset == 0 && output_rows > 0 && output_count > output_rows)
     //     y = first_y + (int)(output_rows - (output_end - output_start)) * line_height(app);
     for (size_t i = input_start_index; i < count; i++) {
-        const char *line = lines[i].text; size_t line_length = (size_t)lines[i].length, global_start = 0;
+        const char *line = lines[i].text; 
+        size_t line_length = (size_t)lines[i].length, global_start = 0;
         for (size_t j = input_start_index; j < i; j++) global_start += (size_t)lines[j].length;
         size_t prompt_part = global_start < prompt_length ? prompt_length - global_start : 0;
         if (prompt_part > line_length) prompt_part = line_length;
@@ -531,21 +704,54 @@ void gui_run(App *app)
         jobs_poll(app);
         multiwatch_poll(app);
 
-        if (!XPending(app->display)) {
-            struct pollfd descriptor = {
-                .fd = x_fd,
-                .events = POLLIN,
-                .revents = 0
-            };
-            int timeout = background_activity_exists(app) ? 100 : -1;
-            (void)poll(&descriptor, 1, timeout);
+        struct pollfd fds[1 + MAX_TABS];
+        int tab_indices[1 + MAX_TABS];
+        fds[0].fd = x_fd;
+        fds[0].events = POLLIN;
+        int nfds = 1;
 
-            if (background_activity_exists(app)) {
-                jobs_poll(app);
-                multiwatch_poll(app);
-                gui_redraw(app);
+        for (int i = 0; i < app->tab_count; i++) {
+            Tab *t = &app->tabs[i];
+            if (t->alive && t->pipe_from_tab[0] >= 0) {
+                fds[nfds].fd = t->pipe_from_tab[0];
+                fds[nfds].events = POLLIN | POLLHUP;
+                tab_indices[nfds] = i;
+                nfds++;
             }
         }
+
+        int timeout = (background_activity_exists(app) || app->multiwatch.active) ? 50 : 50;
+        if (!XPending(app->display)) {
+            (void)poll(fds, nfds, timeout);
+        }
+
+        int needs_redraw = 0;
+        for (int k = 1; k < nfds; k++) {
+            if (fds[k].revents & (POLLIN | POLLHUP)) {
+                int t_idx = tab_indices[k];
+                Tab *t = &app->tabs[t_idx];
+                char buffer[4096];
+                ssize_t bytes = read(t->pipe_from_tab[0], buffer, sizeof(buffer) - 1);
+                if (bytes > 0) {
+                    buffer[bytes] = '\0';
+                    tab_append_raw(t, buffer);
+                    needs_redraw = 1;
+                } else if (bytes == 0) {
+                    close_tab(app, t_idx);
+                    needs_redraw = 1;
+                    break;
+                }
+            }
+        }
+
+        if (background_activity_exists(app)) {
+            jobs_poll(app);
+            multiwatch_poll(app);
+            needs_redraw = 1;
+        }
+
+        if (needs_redraw)
+            gui_redraw(app);
 
         while (XPending(app->display)) {
             XEvent event;
@@ -596,7 +802,8 @@ void gui_run(App *app)
                         } else if (active->continuing) {
                             snprintf(prompt, sizeof(prompt), "> ");
                         } else {
-                            snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", active->cwd);
+                            const char *cwd = (active->shared && active->shared->cwd[0]) ? active->shared->cwd : active->cwd;
+                            snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", cwd);
                         }
                         char input_line[PATH_MAX + INPUT_CAP + 128];
                         snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
@@ -657,9 +864,11 @@ void gui_run(App *app)
                     } else if (active->continuing) {
                         snprintf(prompt, sizeof(prompt), "> ");
                     } else {
-                        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", active->cwd);
+                        const char *cwd = (active->shared && active->shared->cwd[0]) ? active->shared->cwd : active->cwd;
+                        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", cwd);
                     }
                     char input_line[PATH_MAX + INPUT_CAP + 128];
+                    
                     snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
                     size_t output_count = count, cap = capacity;
                     if (wrap_text(app, &lines, &count, &cap, input_line,

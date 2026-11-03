@@ -33,6 +33,8 @@ void shell_execute(App *app, Tab *tab, const char *line)
 
     if (getcwd(tab->cwd, sizeof(tab->cwd)) == NULL)
         snprintf(tab->cwd, sizeof(tab->cwd), "/");
-    if (saved_cwd[0] != '\0')
+    if (tab->shared)
+        snprintf(tab->shared->cwd, sizeof(tab->shared->cwd), "%s", tab->cwd);
+    if (!app->use_process_mode && saved_cwd[0] != '\0')
         chdir(saved_cwd);
 }
