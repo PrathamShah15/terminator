@@ -553,7 +553,7 @@ int hotkey_handle(App *app, XKeyEvent *event, KeySym key, const char *text, int 
             return 1;
         }
 
-        snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", tab->cwd);
+        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", tab->cwd);
         append_visible_command(tab, prompt, tab->input);
 
         if (command_is_incomplete(tab->input)) {

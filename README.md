@@ -1,83 +1,79 @@
 # Terminator — Custom Terminal Emulator
 
-A lightweight, custom terminal emulator for Linux, developed in C using the Xlib library. Terminator combines a graphical terminal interface with a custom command parser and shell execution engine to explore operating system concepts, process management, and inter-process communication.
+Terminator is a lightweight graphical terminal emulator and shell-like command environment for Linux. It is written in C using Xlib and Xft. The project implements its own command parsing and process-execution logic and demonstrates operating-system concepts such as process creation, pipes, file-descriptor redirection, signals, process groups, and job control.
+
+The application uses a graphical X11 window with multiple tabs. Each tab maintains its own working directory, input line, output, and history-navigation state.
 
 ## Features
 
-### Graphical User Interface
-- Xlib-based terminal window.
-- Multiple tabs for separate terminal sessions.
-- Command-line input and output display.
-- Text wrapping and terminal output scrolling.
-- Keyboard-driven interaction.
+### Graphical interface
+- Xlib window with Xft text rendering.
+- Black terminal-style background and colored prompt.
+- Prompt format: `pratham@terminator:/path/to/current/directory$`.
+- Multiple tabs, with controls to create and close tabs.
+- Independent working directory and command state for each tab.
+- Output wrapping, scrolling, and window-resize handling.
+- Off-screen Pixmap backbuffer for complete-frame rendering.
+- Mouse selection of rendered terminal output.
 
-### Shell and Command Execution
-- Execute external Linux commands using `fork()`, `execvp()`, and `waitpid()`.
-- Built-in commands such as `cd`, `exit`, `history`, and `clear`, where implemented.
-- Track command exit status.
-- Basic support for quoted arguments and multiline command continuation.
-- Wildcard expansion using `glob()`.
+### Shell and command execution
+- External command execution using `fork()`, `execvp()`, and `waitpid()`.
+- Built-in commands: `cd`, `clear`, `exit`, `history`, `jobs`, `fg`, `bg`, and `multiWatch`.
+- Quoted arguments and multiline command continuation.
+- Environment-variable expansion, including `$NAME` and `${NAME}`.
+- Command substitution using `$(...)`, including nested substitutions.
+- Filename wildcard expansion using `glob()`.
 
-### Pipes and I/O Redirection
-- Connect multiple commands using pipelines (`|`).
-- Support multi-stage pipelines using `pipe()`.
-- Redirect standard input using `<`.
-- Redirect standard output using `>`.
-- Use `dup2()` to configure file descriptors for commands.
-- Combine command execution with pipes and redirection.
+### Pipelines and redirection
+- Multi-stage pipelines using `|`.
+- Input redirection using `<`.
+- Output redirection using `>`.
+- File-descriptor setup using `pipe()` and `dup2()`.
 
-### Keyboard Shortcuts
+### Process and job control
+- Background commands using `&`.
+- Process-group tracking for jobs and pipelines.
+- `jobs`, `fg`, and `bg` commands.
+- Foreground interruption with `Ctrl+C`.
+- Foreground suspension with `Ctrl+Z`.
+- GUI event processing while a foreground command is running.
 
-| Shortcut | Function |
-|---|---|
-| `Ctrl + A` | Move cursor to the beginning of the line |
-| `Ctrl + E` | Move cursor to the end of the line |
-| `Ctrl + U` | Delete text before the cursor |
-| `Ctrl + K` | Delete text after the cursor |
-| `Ctrl + W` | Delete the previous word |
-| `Ctrl + L` | Clear the terminal display |
-| `Ctrl + D` | Handle EOF or exit the shell on an empty line |
-| `Ctrl + T` | Open a new tab |
-| `Ctrl + C` | Interrupt the foreground command |
-| `Ctrl + Z` | Suspend the foreground command |
-| `Up / Down` | Navigate command history |
-| `Left / Right` | Move the input cursor |
+### multiWatch
+- Run multiple commands concurrently.
+- Each watched command may contain a pipeline.
+- Rerun each command two seconds after its previous execution completes.
+- Stop the active monitoring session with `Ctrl+C`.
 
-### Signals and Job Control
-- Handle `SIGINT` for interrupting foreground commands.
-- Handle `SIGTSTP` for suspending foreground commands.
-- Run commands in the background using `&`.
-- List active or tracked jobs using `jobs`.
-- Resume suspended jobs in the foreground using `fg`.
-- Resume jobs in the background using `bg`.
-- Manage process groups for commands and pipelines, where implemented.
+### History, completion, and clipboard
+- Persistent command history in `~/.terminator_history`.
+- History capacity of 10,000 commands.
+- Search history with `Ctrl+R`.
+- Filename/path completion with repeated `Tab` presses.
+- Copy selected terminal output with `Ctrl+Shift+C`.
+- Paste clipboard text with `Ctrl+Shift+V`.
 
-### Process Management and Operating System Concepts
-- Create child processes using `fork()`.
-- Execute programs using `execvp()`.
-- Synchronize with child processes using `waitpid()`.
-- Manage file descriptors using `dup2()`.
-- Establish inter-process communication through pipes.
-- Explore process states, signals, and foreground/background execution.
+## Requirements
 
-## Technology Stack
-
-- **Language:** C
-- **GUI Library:** Xlib
-- **Platform:** Linux
-- **Build System:** Make
-- **System Interfaces:** POSIX process management, signals, pipes, and file descriptors
-
-## Getting Started
-
-### Prerequisites
-
-- A Linux environment with X11 development libraries.
-- GCC or another compatible C compiler.
+- Linux with an X11-compatible graphical session (X11 or XWayland).
+- GCC.
 - GNU Make.
-- An X11-compatible graphical session.
+- `pkg-config`.
+- X11 and Xft development libraries.
+- A monospace font; the application requests `DejaVu Sans Mono`.
 
-### Build
+### Arch Linux
+
+```bash
+sudo pacman -S --needed gcc make pkgconf libx11 libxft fontconfig
+```
+
+### Debian / Ubuntu
+
+```bash
+sudo apt install build-essential make pkg-config libx11-dev libxft-dev fontconfig
+```
+
+## Build and run
 
 Clone the repository:
 
@@ -86,138 +82,138 @@ git clone https://github.com/PrathamShah15/terminator.git
 cd terminator
 ```
 
-Compile the project:
+Build:
 
 ```bash
 make
 ```
 
-Run the executable generated by the Makefile. If the executable is named `terminator`, use:
+Run:
 
 ```bash
 ./terminator
 ```
 
-## Example Commands
-
-Try these commands to explore supported shell features:
+To remove generated object files and the executable:
 
 ```bash
+make clean
+```
+
+The Makefile compiles these source files and links against X11 and Xft:
+
+```text
+main.c gui.c shell.c parser.c builtins.c hotkeys.c multiwatch.c
+```
+
+## Example commands
+
+```bash
+pwd
 ls -la
-```
-
-```bash
-cat file.txt | sort
-```
-
-```bash
+cd ..
+echo "$HOME"
+echo "${HOME}"
+echo "Current directory: $(pwd)"
+echo "Files in $(basename $(pwd)): $(ls | wc -l)"
 ls *.c
-```
-
-```bash
-cat < input.txt > output.txt
-```
-
-```bash
+cat < input.txt
+echo "hello" > output.txt
+cat input.txt | grep error | wc -l
 sleep 30 &
 ```
 
-The exact behavior depends on which features are implemented in the current version.
+The parser handles command substitution internally; it does not pass the command line to `/bin/sh -c`.
 
-## Design Principles
+## Built-in commands
 
-- Implement command parsing, pipelines, and redirection within the project rather than delegating command interpretation to Bash or another shell.
-- Avoid pseudo-terminals and `forkpty()` in accordance with the project constraints.
-- Use operating system system calls to understand process creation, execution, synchronization, and communication.
-- Keep the graphical interface and shell execution logic organized into separate source files.
+| Command | Description |
+|---|---|
+| `cd [path]` | Change the active tab's working directory. |
+| `clear` | Clear the active tab's output. |
+| `exit` | Exit the application. |
+| `history` | Display the most recent 1,000 stored commands. |
+| `jobs` | List tracked background or stopped jobs. |
+| `fg [job]` | Resume a tracked job in the foreground. |
+| `bg [job]` | Resume a stopped job in the background. |
+| `multiWatch ["cmd1", "cmd2"]` | Repeatedly execute a list of commands. |
 
-## Project Structure
+Job identifiers can be supplied as a number or with a `%` prefix, for example `fg 1` or `bg %1`.
 
-The project is organized into separate C source and header files for the GUI, command parsing, shell execution, built-in commands, keyboard shortcuts, and shared definitions.
-
-## Project Status
-
-Terminator is an educational project under development. It aims to demonstrate the core mechanisms behind a terminal emulator and shell, rather than provide a complete Bash-compatible environment. Advanced features and full compatibility depend on the current implementation.
-
-## License
-
-No license has been specified yet.
-
-
-## `multiWatch` (parallel command monitoring)
-
-`multiWatch` runs multiple commands concurrently, captures each command's output, and reruns each command two seconds after its previous run completes. Each command may contain a pipeline; the shell builds the pipeline itself rather than asking Bash or another shell to interpret it. Focus the Terminator window and press **Ctrl+C** to stop all watched commands while leaving the terminal open.
-
-Example:
+### multiWatch example
 
 ```text
 multiWatch ["date +%T", "ls | wc -l"]
 ```
 
-The compact example spellings `date+%T` and `wc-l` are also accepted and normalized to `date +%T` and `wc -l`.
+The commands run concurrently. Each command is launched again two seconds after its previous execution completes. Only one `multiWatch` session can be active at a time. Focus the Terminator window and press `Ctrl+C` to stop it.
 
+The compact spellings `date+%T` and `wc-l` are also accepted for the assignment example and normalized to `date +%T` and `wc -l`.
 
-## New interactive features
+## Keyboard shortcuts
 
-### Searchable command history (Task 9)
+| Shortcut | Action |
+|---|---|
+| `Ctrl+A` | Move the input cursor to the beginning. |
+| `Ctrl+E` | Move the input cursor to the end. |
+| `Ctrl+U` | Delete input before the cursor. |
+| `Ctrl+K` | Delete input after the cursor. |
+| `Ctrl+W` | Delete the previous word. |
+| `Ctrl+L` | Clear the active tab's output. |
+| `Ctrl+D` | Send EOF / exit on an empty input line. |
+| `Ctrl+T` | Create a new tab. |
+| `Alt+1` … `Alt+8` | Switch to the corresponding tab. |
+| `Ctrl+C` | Interrupt the foreground process group; stop `multiWatch`. |
+| `Ctrl+Z` | Suspend the foreground process group. |
+| `Up` / `Down` | Navigate command history. |
+| `Left` / `Right` | Move the input cursor. |
+| `Ctrl+R` | Search command history. |
+| `Tab` | Start or cycle through filename completions. |
+| `Enter` | Execute input, or accept a completion when completion is active. |
+| `Esc` | Cancel history search or filename completion. |
+| `Ctrl+Shift+C` | Copy the selected terminal output. |
+| `Ctrl+Shift+V` | Paste clipboard text at the input cursor. |
+| Mouse drag | Select rendered terminal output. |
+| Mouse wheel | Scroll terminal output. |
 
-- Command history is shared by all tabs and persisted in `~/.terminator_history`.
-- The history store retains up to 10,000 commands.
-- `history` displays the most recent 1,000 commands.
-- Press `Ctrl+R`, type a search term, and press Enter:
-  - The most recent exact command match is printed first.
-  - If there is no exact match, commands with the globally longest common substring are printed, provided that substring is longer than two characters.
-  - Otherwise, a no-match message is printed.
-- Press Escape to cancel a search.
+When filename completion is active, repeated `Tab` presses cycle through candidates. The selected candidate is highlighted. Press `Enter` once to accept it into the input line; press `Enter` again to execute the command. Press `Esc` to cancel.
 
-### File-name completion (Task 10)
+### History search
 
-- Press Tab to complete the word immediately before the cursor.
-- Completion searches the active tab's current working directory (or the directory component typed in the word).
-- Matching filenames are shown below the input line.
-- Repeated Tab presses cycle through the matches and highlight the current choice.
-- The first Enter accepts the highlighted filename into the input line; a second Enter executes the command.
-- Escape cancels the candidate list; no match leaves the input unchanged.
-- Text after the cursor is preserved.
+Command history is shared across tabs and persisted in `~/.terminator_history`. The history store retains up to 10,000 commands; consecutive duplicate commands are skipped. The `history` command displays up to the most recent 1,000 entries.
 
-### X11 clipboard shortcuts
+Press `Ctrl+R` and enter a search term. The most recent exact command match is preferred. If there is no exact match, the search uses the longest common contiguous substring and prints matches only when the score is greater than two characters. Press `Esc` to cancel.
 
-- `Ctrl+Shift+C` copies the current command input line to the X11 `CLIPBOARD` and `PRIMARY` selections.
-- `Ctrl+Shift+V` requests the `CLIPBOARD` selection and inserts the received text at the cursor.
-- This version copies the current input line; mouse-based selection of arbitrary terminal output is not implemented.
+### Clipboard behavior
 
-### Background jobs and `sleep`
+`Ctrl+Shift+C` copies the currently selected, rendered terminal output to the X11 clipboard. `Ctrl+Shift+V` requests clipboard text and inserts it at the current input cursor. Mouse dragging selects output text.
 
-Append `&` to run a command in the background, for example:
+## Project structure
 
-```sh
-sleep 100 &
+```text
+terminator/
+├── main.c          # Application initialization and X11 resource setup
+├── gui.c           # Window, rendering, tabs, scrolling, mouse selection, event loop
+├── shell.c         # Built-in dispatch and per-tab working-directory handling
+├── parser.c        # Expansion, parsing, pipelines, redirection, process/job control
+├── builtins.c      # Built-ins, tab output buffer, persistent history
+├── hotkeys.c       # Input editing, shortcuts, completion, history search, clipboard
+├── multiwatch.c    # Concurrent repeated command execution
+├── terminator.h    # Shared structures, constants, and function declarations
+└── Makefile        # Build rules
 ```
 
-The prompt remains available while that job runs. Background commands without explicit input redirection receive `/dev/null` as standard input so they cannot consume input from the launching terminal.
+## Implementation notes and limitations
 
-Without `&`, `sleep 100` is a foreground command. While it runs, Terminator continues processing X11 events: you can switch tabs and edit another tab's input line. Enter is held until the foreground command completes. Ctrl+C and Ctrl+Z are delivered to the foreground process group in its own tab. This project currently uses direct `fork`/`execvp` execution with pipes, not a pseudo-terminal (PTY); therefore interactive foreground child programs that read from a terminal are not supported like they are in a full terminal emulator.
+- This is an educational shell-like terminal project, not a complete Bash/POSIX shell.
+- Command parsing and expansion are implemented in `parser.c`; there is no separate `lexer.c` module in this version.
+- External commands are launched with `execvp()`. Terminator does not use `/bin/sh -c` to interpret command strings.
+- Command substitution runs the inner command through the project's own parser/executor, captures standard output, and removes trailing newline characters before inserting the result. Background commands inside command substitution are rejected.
+- The project uses pipes and child processes but does **not** currently use a pseudo-terminal (PTY). As a result, interactive full-screen programs such as `vim`, `top`, and `less` are not supported as they are in a conventional terminal emulator.
+- Shell quoting, expansion, redirection, and job-control behavior are limited to the syntax implemented in this project; full Bash compatibility is not intended.
+- `multiWatch` supports one active monitoring session at a time.
+- The application requires an X11 display or XWayland.
 
-## Build
+## License
 
-On Arch Linux, install the development dependencies:
-
-```sh
-sudo pacman -S --needed gcc make pkgconf libx11 libxft fontconfig
-```
-
-Then build and run:
-
-```sh
-make clean
-make
-./terminator
-```
-
-
-## Rendering stability
-
-The GUI now renders complete frames into an off-screen X11 Pixmap and copies
-the finished frame to the window in one operation. Idle windows are event
-driven rather than being cleared and redrawn every 100 ms. Background jobs
-and multiWatch retain periodic polling so arriving output remains visible.
+No license file is included in this project archive. Add a `LICENSE` file if you intend to distribute the project under a specific open-source license.

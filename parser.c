@@ -77,6 +77,260 @@ static int add_argument(Command *command, const char *word)
     return 0;
 }
 
+static int append_variable(
+    const char *text,
+    size_t *i,
+    char *word,
+    size_t *used,
+    size_t capacity
+)
+{
+    size_t start;
+    size_t end;
+    char name[256];
+    const char *value;
+    size_t len;
+
+    if (text[*i] != '$')
+        return 0;
+
+    (*i)++;
+
+    if (text[*i] == '{') {
+        start = ++(*i);
+
+        while (text[*i] != '\0' && text[*i] != '}')
+            (*i)++;
+
+        if (text[*i] != '}')
+            return -1;
+
+        end = *i;
+        (*i)++;
+    }
+    else {
+        start = *i;
+
+        if (!(isalpha((unsigned char)text[*i]) ||
+              text[*i] == '_')) {
+            if (*used + 1 >= capacity)
+                return -1;
+
+            word[(*used)++] = '$';
+            return 0;
+        }
+
+        while (isalnum((unsigned char)text[*i]) ||
+               text[*i] == '_')
+            (*i)++;
+
+        end = *i;
+    }
+
+    len = end - start;
+
+    if (len == 0 || len >= sizeof(name))
+        return -1;
+
+    memcpy(name, text + start, len);
+    name[len] = '\0';
+
+    value = getenv(name);
+
+    if (value == NULL)
+        value = "";
+
+    len = strlen(value);
+
+    if (*used + len >= capacity)
+        return -1;
+
+    memcpy(word + *used, value, len);
+    *used += len;
+
+    return 1;
+}
+
+
+
+/*
+ * Command substitution is executed by this parser, not by /bin/sh.
+ * The child runs the same pipeline parser in capture mode; its stdout is
+ * collected by the caller and substituted into the outer command.
+ */
+static int parser_execute_pipeline_internal(App *app, Tab *tab,
+                                            const char *line,
+                                            int capture_mode);
+
+static int capture_command_output(App *app, Tab *tab,
+                                  const char *command,
+                                  char *output, size_t output_size);
+
+static int append_text(char *output, size_t output_size,
+                       size_t *used, const char *text, size_t length)
+{
+    if (length > output_size - *used - 1)
+        return -1;
+    memcpy(output + *used, text, length);
+    *used += length;
+    output[*used] = '\0';
+    return 0;
+}
+
+/*
+ * Find the closing ')' for a "$(" beginning at start.
+ * Quotes and backslash escapes inside the substitution are respected.
+ * Nested "$(...)" expressions increase the depth.
+ */
+static int find_substitution_end(const char *input, size_t start,
+                                 size_t *end)
+{
+    size_t i = start + 2;
+    int depth = 1;
+    char quote = '\0';
+    int escaped = 0;
+
+    while (input[i] != '\0') {
+        char c = input[i];
+
+        if (escaped) {
+            escaped = 0;
+            i++;
+            continue;
+        }
+
+        if (c == '\\' && quote != '\'') {
+            escaped = 1;
+            i++;
+            continue;
+        }
+
+        /* A nested $(...) is active inside double quotes, but not
+           inside single quotes. */
+        if (c == '$' && input[i + 1] == '(' && quote != '\'') {
+            depth++;
+            i += 2;
+            continue;
+        }
+
+        if (quote != '\0') {
+            if (c == quote)
+                quote = '\0';
+            i++;
+            continue;
+        }
+
+        if (c == '\'' || c == '"') {
+            quote = c;
+            i++;
+            continue;
+        }
+
+        if (c == '(') {
+            depth++;
+            i++;
+            continue;
+        }
+
+        if (c == ')') {
+            depth--;
+            if (depth == 0) {
+                *end = i;
+                return 0;
+            }
+            i++;
+            continue;
+        }
+
+        i++;
+    }
+
+    return -1;
+}
+
+/*
+ * Expand command substitutions in one command string.
+ * Substitutions inside single quotes and escaped "$(" are left literal.
+ * The inner command is recursively handled by parser_execute_pipeline_internal.
+ */
+static int expand_command_substitutions(App *app, Tab *tab,
+                                        const char *input,
+                                        char *output, size_t output_size)
+{
+    size_t i = 0;
+    size_t used = 0;
+    char quote = '\0';
+
+    if (output_size == 0)
+        return -1;
+    output[0] = '\0';
+
+    while (input[i] != '\0') {
+        char c = input[i];
+
+        if (c == '\\' && quote != '\'') {
+            /* Preserve the escape and the following character verbatim.
+               This also prevents an escaped "$(" from being expanded. */
+            if (input[i + 1] != '\0') {
+                if (append_text(output, output_size, &used,
+                                input + i, 2) != 0)
+                    return -1;
+                i += 2;
+                continue;
+            }
+        }
+
+        if (c == '\'' && quote != '"') {
+            quote = (quote == '\'') ? '\0' : '\'';
+            if (append_text(output, output_size, &used, input + i, 1) != 0)
+                return -1;
+            i++;
+            continue;
+        }
+
+        if (c == '"' && quote != '\'') {
+            quote = (quote == '"') ? '\0' : '"';
+            if (append_text(output, output_size, &used, input + i, 1) != 0)
+                return -1;
+            i++;
+            continue;
+        }
+
+        if (quote != '\'' && c == '$' && input[i + 1] == '(') {
+            size_t end = 0;
+            char inner[INPUT_CAP];
+            char captured[INPUT_CAP];
+
+            if (find_substitution_end(input, i, &end) != 0)
+                return -1;
+
+            size_t inner_len = end - (i + 2);
+            if (inner_len == 0 || inner_len >= sizeof(inner))
+                return -1;
+
+            memcpy(inner, input + i + 2, inner_len);
+            inner[inner_len] = '\0';
+
+            if (capture_command_output(app, tab, inner,
+                                       captured, sizeof(captured)) != 0)
+                return -1;
+
+            if (append_text(output, output_size, &used,
+                            captured, strlen(captured)) != 0)
+                return -1;
+
+            i = end + 1;
+            continue;
+        }
+
+        if (append_text(output, output_size, &used, input + i, 1) != 0)
+            return -1;
+        i++;
+    }
+
+    return quote == '\0' ? 0 : -1;
+}
+
 static int parse_words(const char *text, Command *command)
 {
     size_t i = 0;
@@ -119,10 +373,28 @@ static int parse_words(const char *text, Command *command)
             i++;
             if (c == '\\' && quote != '\'' && text[i] != '\0') {
                 c = text[i++];
-            } else if ((c == '\'' || c == '"') && (quote == '\0' || quote == c)) {
+            }
+            else if ((c == '\'' || c == '"') &&
+                    (quote == '\0' || quote == c)) {
                 quote = quote == '\0' ? c : '\0';
                 continue;
             }
+            else if (c == '$' && quote != '\'') {
+                i--;
+
+                int result = append_variable(
+                    text, &i, word, &used, sizeof(word)
+                );
+
+                if (result < 0)
+                    return -1;
+
+                if (result > 0)
+                    continue;
+
+                continue;
+            }
+
             if (used + 1 < sizeof(word))
                 word[used++] = c;
         }
@@ -247,7 +519,8 @@ static void drain_output(App *app, Tab *tab, int fd)
 
 /* Wait without freezing X11: Ctrl+C and Ctrl+Z are delivered to the job's process group. */
 static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
-                           const char *command, int *was_stopped)
+                           const char *command, int *was_stopped,
+                           int capture_mode)
 {
     int output_open = 1;
     int group_done = 0;
@@ -255,6 +528,79 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
     *was_stopped = 0;
     app->foreground_pgid = pgid;
     app->foreground_tab_index = (int)(tab - app->tabs);
+
+    /*
+     * Capture mode is used only in a forked command-substitution child.
+     * It must not access X11 or append output to the GUI tab.
+     */
+    if (capture_mode) {
+        while (!group_done) {
+            struct pollfd pfd;
+            pfd.fd = output_open ? output_fd : -1;
+            pfd.events = POLLIN | POLLHUP;
+            pfd.revents = 0;
+            (void)poll(&pfd, 1, 50);
+
+            if (output_open && (pfd.revents & (POLLIN | POLLHUP))) {
+                char buffer[2048];
+                ssize_t bytes;
+                while ((bytes = read(output_fd, buffer, sizeof(buffer))) > 0) {
+                    size_t offset = 0;
+                    while (offset < (size_t)bytes) {
+                        ssize_t written = write(STDOUT_FILENO,
+                                                buffer + offset,
+                                                (size_t)bytes - offset);
+                        if (written < 0 && errno == EINTR)
+                            continue;
+                        if (written <= 0)
+                            break;
+                        offset += (size_t)written;
+                    }
+                }
+                if (bytes == 0)
+                    output_open = 0;
+            }
+
+            int status;
+            pid_t result;
+            do {
+                result = waitpid(-pgid, &status, WNOHANG | WUNTRACED);
+            } while (result < 0 && errno == EINTR);
+
+            if (result > 0 && WIFSTOPPED(status)) {
+                (void)kill(-pgid, SIGTERM);
+                *was_stopped = 1;
+                final_status = 128 + WSTOPSIG(status);
+                break;
+            }
+
+            if (result < 0 && errno == ECHILD)
+                group_done = 1;
+        }
+
+        if (output_open) {
+            char buffer[2048];
+            ssize_t bytes;
+            while ((bytes = read(output_fd, buffer, sizeof(buffer))) > 0) {
+                size_t offset = 0;
+                while (offset < (size_t)bytes) {
+                    ssize_t written = write(STDOUT_FILENO,
+                                            buffer + offset,
+                                            (size_t)bytes - offset);
+                    if (written < 0 && errno == EINTR)
+                        continue;
+                    if (written <= 0)
+                        break;
+                    offset += (size_t)written;
+                }
+            }
+        }
+
+        close(output_fd);
+        app->foreground_pgid = 0;
+        app->foreground_tab_index = -1;
+        return final_status;
+    }
 
     while (!group_done && !*was_stopped) {
         struct pollfd fds[2];
@@ -394,6 +740,89 @@ static int wait_foreground(App *app, Tab *tab, pid_t pgid, int output_fd,
     return final_status;
 }
 
+
+/*
+ * Run an inner command through this parser and capture stdout.
+ * The child has a private copy of App/Tab after fork(), so GUI state changes
+ * made by the inner command cannot modify the parent application's memory.
+ */
+static int capture_command_output(App *app, Tab *tab,
+                                  const char *command,
+                                  char *output, size_t output_size)
+{
+    int pipefd[2];
+    pid_t pid;
+    size_t used = 0;
+    int status = 0;
+
+    if (output_size == 0 || pipe(pipefd) != 0)
+        return -1;
+
+    pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0)
+            _exit(126);
+        close(pipefd[1]);
+
+        int result = parser_execute_pipeline_internal(app, tab, command, 1);
+        fflush(stdout);
+        _exit(result == 0 ? 0 : result);
+    }
+
+    close(pipefd[1]);
+
+    for (;;) {
+        char buffer[1024];
+        ssize_t bytes = read(pipefd[0], buffer, sizeof(buffer));
+
+        if (bytes > 0) {
+            if ((size_t)bytes > output_size - used - 1) {
+                close(pipefd[0]);
+                (void)kill(pid, SIGTERM);
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                    ;
+                return -1;
+            }
+            memcpy(output + used, buffer, (size_t)bytes);
+            used += (size_t)bytes;
+            continue;
+        }
+
+        if (bytes < 0 && errno == EINTR)
+            continue;
+        if (bytes < 0) {
+            close(pipefd[0]);
+            (void)kill(pid, SIGTERM);
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                ;
+            return -1;
+        }
+        break;
+    }
+
+    close(pipefd[0]);
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+
+    /* Command substitution removes trailing newline characters only. */
+    while (used > 0 && output[used - 1] == '\n')
+        used--;
+    output[used] = '\0';
+
+    return 0;
+}
+
+
 int job_control_builtin(App *app, Tab *tab, const char *line)
 {
     char name[16] = "";
@@ -448,18 +877,32 @@ int job_control_builtin(App *app, Tab *tab, const char *line)
     job->active = 0;
     job->output_fd = -1;
     int stopped = 0;
-    (void)wait_foreground(app, tab, pgid, fd, command, &stopped);
+    (void)wait_foreground(app, tab, pgid, fd, command, &stopped, 0);
     return 1;
 }
 
-int parser_execute_pipeline(App *app, Tab *tab, const char *line)
+static int parser_execute_pipeline_internal(App *app, Tab *tab,
+                                            const char *line,
+                                            int capture_mode)
 {
     char command_line[INPUT_CAP];
-    snprintf(command_line, sizeof(command_line), "%s", line);
+
+    if (expand_command_substitutions(app, tab, line,
+                                     command_line, sizeof(command_line)) != 0) {
+        if (!capture_mode)
+            tab_append(tab, "terminator: command substitution failed or too large\n");
+        return 2;
+    }
+
     size_t line_length = strlen(command_line);
     while (line_length > 0 && isspace((unsigned char)command_line[line_length - 1]))
         command_line[--line_length] = '\0';
     int background = line_length > 0 && command_line[line_length - 1] == '&';
+    if (background && capture_mode) {
+        dprintf(STDERR_FILENO,
+                "terminator: background commands are not supported inside $(...)\n");
+        return 2;
+    }
     if (background) {
         command_line[--line_length] = '\0';
         while (line_length > 0 && isspace((unsigned char)command_line[line_length - 1]))
@@ -519,7 +962,8 @@ int parser_execute_pipeline(App *app, Tab *tab, const char *line)
                 dup2(pipes[i][1], STDOUT_FILENO);
             else
                 dup2(output_pipe[1], STDOUT_FILENO);
-            dup2(output_pipe[1], STDERR_FILENO);
+            if (!capture_mode)
+                dup2(output_pipe[1], STDERR_FILENO);
 
             for (int j = 0; j < count - 1; j++) {
                 close(pipes[j][0]);
@@ -630,9 +1074,18 @@ int parser_execute_pipeline(App *app, Tab *tab, const char *line)
     }
     else {
         int stopped = 0;
-        status = wait_foreground(app,tab,pgid,output_pipe[0],command_line,&stopped);
+        status = wait_foreground(app, tab, pgid, output_pipe[0],
+                                 command_line, &stopped, capture_mode);
     }
 
     free_commands(commands, count);
     return status;
+}
+
+
+
+/* Public normal-mode entry point used by shell.c and other modules. */
+int parser_execute_pipeline(App *app, Tab *tab, const char *line)
+{
+    return parser_execute_pipeline_internal(app, tab, line, 0);
 }

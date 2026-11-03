@@ -322,7 +322,7 @@ void gui_redraw(App *app)
     } else if (tab->continuing) {
         snprintf(prompt, sizeof(prompt), "> ");
     } else {
-        snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", tab->cwd);
+        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", tab->cwd);
     }
     char input_line[PATH_MAX + INPUT_CAP + 128];
     snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
@@ -596,7 +596,7 @@ void gui_run(App *app)
                         } else if (active->continuing) {
                             snprintf(prompt, sizeof(prompt), "> ");
                         } else {
-                            snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", active->cwd);
+                            snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", active->cwd);
                         }
                         char input_line[PATH_MAX + INPUT_CAP + 128];
                         snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
@@ -657,7 +657,7 @@ void gui_run(App *app)
                     } else if (active->continuing) {
                         snprintf(prompt, sizeof(prompt), "> ");
                     } else {
-                        snprintf(prompt, sizeof(prompt), "user@terminator:%s$ ", active->cwd);
+                        snprintf(prompt, sizeof(prompt), "pratham@terminator:%s$ ", active->cwd);
                     }
                     char input_line[PATH_MAX + INPUT_CAP + 128];
                     snprintf(input_line, sizeof(input_line), "%s%s", prompt, visible_input);
